@@ -1,3 +1,5 @@
+import type { SpawnOptions } from 'node:child_process';
+
 import { spawn } from 'node:child_process';
 import { addAbortListener } from 'node:events';
 
@@ -7,16 +9,20 @@ export async function runProcess(
   context: TaskContext,
   command: string,
   args: readonly string[],
+  input?: string,
 ): Promise<void> {
   context.signal.throwIfAborted();
   await new Promise<void>((resolve, reject) => {
-    const child = spawn(command, args, {
+    const options = {
       cwd: context.cwd,
       killSignal: 'SIGKILL',
       signal: context.signal,
-      stdio: ['ignore', 'pipe', 'pipe'],
       windowsHide: true,
-    });
+    } satisfies SpawnOptions;
+    const child =
+      input === undefined
+        ? spawn(command, args, { ...options, stdio: ['ignore', 'pipe', 'pipe'] })
+        : spawn(command, args, { ...options, stdio: ['pipe', 'pipe', 'pipe'] });
     let failure: { error: unknown } | undefined;
     const discardOutput = () => {
       child.stdout.destroy();
@@ -44,6 +50,11 @@ export async function runProcess(
 
     forward(child.stdout, 'info');
     forward(child.stderr, 'error');
+    child.stdin?.on('error', (error: NodeJS.ErrnoException) => {
+      if (error.code !== 'EPIPE') {
+        failure ??= { error };
+      }
+    });
     child.on('error', (error) => {
       failure ??= { error };
     });
@@ -58,5 +69,6 @@ export async function runProcess(
         reject(Object.assign(new Error(`"${command}" ${reason}`), { code: 'PROCESS_FAILED' }));
       }
     });
+    child.stdin?.end(input);
   });
 }

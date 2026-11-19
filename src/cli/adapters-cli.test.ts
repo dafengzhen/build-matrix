@@ -2,9 +2,9 @@ import type { MatrixDefinition, StageDefinition } from '@dafengzhen/build-matrix
 import type { TestContext } from 'vitest';
 
 import { createPlan } from '@dafengzhen/build-matrix';
-import { executePlan } from '@dafengzhen/build-matrix/executor';
+import { createDefaultRegistry, executePlan } from '@dafengzhen/build-matrix/executor';
 import { execFile } from 'node:child_process';
-import { cp, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
+import { cp, mkdir, mkdtemp, readdir, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -34,14 +34,23 @@ it(
   async (t) => {
     const cwd = await workspace(t);
     await mkdir(join(cwd, 'site files'));
+    await writeFile(
+      join(cwd, 'site files', 'entry.js'),
+      'console.log(__PROJECT_CONFIG__, __VITE_MODE__, __MATRIX_TARGET__);',
+    );
     await mkdir(join(cwd, 'build', 'browser'), { recursive: true });
     await writeFile(join(cwd, 'build', 'browser', 'stale.txt'), 'stale');
     const logger = { error() {}, info() {} };
+    const registry = createDefaultRegistry({
+      clean: { path: 'build/{target}' },
+      shell: { command: node },
+      vite: { configFile: 'project.vite.mjs', mode: 'development', root: 'site files' },
+    });
     const plan = makePlan(
       [
         {
           id: 'clean',
-          tasks: [{ adapter: 'clean', id: 'remove', options: { path: 'build/{target}' } }],
+          tasks: [{ adapter: 'clean', id: 'remove' }],
         },
         {
           id: 'prepare',
@@ -52,9 +61,8 @@ it(
               options: {
                 args: [
                   '-e',
-                  'require("node:fs").writeFileSync("site files/index.html", "<p>Matrix build</p>")',
+                  'require("node:fs").writeFileSync("site files/index.html", "<p>Matrix build</p><script type=module src=./entry.js></script>")',
                 ],
-                command: node,
               },
             },
           ],
@@ -71,10 +79,15 @@ it(
               },
               id: 'vite-build',
               options: {
-                configFile: 'project.vite.mjs',
                 mode: 'production',
                 outDir: 'build/{target}',
-                root: 'site files',
+                viteConfig: {
+                  build: { assetsDir: 'bundles', outDir: 'unused' },
+                  configFile: false,
+                  define: { __MATRIX_TARGET__: '"{target}"' },
+                  mode: 'development',
+                  root: 'unused',
+                },
               },
             },
           ],
@@ -84,10 +97,17 @@ it(
     );
     await writeFile(
       join(cwd, 'project.vite.mjs'),
-      'export default { build: { minify: false, watch: {} } }',
+      `export default ({ mode }) => ({
+        build: { emptyOutDir: true, minify: false, watch: {} },
+        define: {
+          __MATRIX_TARGET__: '"fallback"',
+          __PROJECT_CONFIG__: '"project"',
+          __VITE_MODE__: JSON.stringify(mode),
+        },
+      })`,
     );
 
-    const result = await executePlan(plan, { cwd, logger, signal: t.signal });
+    const result = await executePlan(plan, { cwd, logger, registry, signal: t.signal });
     assert.strictEqual(result.status, 'success', JSON.stringify(result));
     expect(result.stages[0].tasks[0].metadata).toStrictEqual({ removed: true });
     expect(result.stages[2].tasks[0].outputs).toStrictEqual([
@@ -95,6 +115,11 @@ it(
     ]);
     expect(await readFile(join(cwd, 'build', 'browser', 'index.html'), 'utf8')).toMatch(
       /Matrix build/,
+    );
+    const assets = join(cwd, 'build', 'browser', 'bundles');
+    const [bundle] = await readdir(assets);
+    expect(await readFile(join(assets, bundle), 'utf8')).toContain(
+      'console.log("project", "production", "browser")',
     );
     await expect(readFile(join(cwd, 'build', 'browser', 'stale.txt'))).rejects.toMatchObject({
       code: 'ENOENT',
@@ -112,6 +137,7 @@ it(
           observed.push(taskId);
         },
       },
+      registry,
       signal: t.signal,
     });
     expect(next.counts.cached).toBe(1);

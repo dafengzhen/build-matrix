@@ -5,8 +5,11 @@ export type { RunFilter } from './filter.js';
 export { createDetailedReport, createManifest, writeManifest } from './manifest.js';
 export type { ManifestV1, ManifestV2 } from './manifest.js';
 export { AdapterRegistry, createDefaultRegistry } from './registry.js';
+export type { BuiltinAdapterDefaults } from './registry.js';
 export type {
   Adapter,
+  AdapterDefinition,
+  AdapterFactory,
   AdapterLoader,
   AdapterOutput,
   Artifact,
@@ -22,6 +25,8 @@ export type {
   TaskError,
   TaskResult,
   TaskStatus,
+  WatchAdapter,
+  WatchContext,
   WatchRunInfo,
 } from './types.js';
 export { watchPlan } from './watch.js';

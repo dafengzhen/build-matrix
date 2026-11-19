@@ -1,8 +1,15 @@
-import type { JsonObject, ResourceLimits, Variant } from '../core/types.js';
+import type { JsonObject, JsonValue, ResourceLimits, Variant } from '../core/types.js';
 
 export interface Adapter<Options = unknown> {
   run(context: TaskContext, options: Options): Promise<AdapterOutput>;
 }
+
+export interface AdapterDefinition<Options = unknown> {
+  readonly defaults?: JsonValue;
+  readonly factory: AdapterFactory<Options>;
+}
+
+export type AdapterFactory<Options = unknown> = () => Adapter<Options> | Promise<Adapter<Options>>;
 
 export type AdapterLoader<Options = unknown> = () =>
   | { default: Adapter<Options> }
@@ -11,6 +18,7 @@ export type AdapterLoader<Options = unknown> = () =>
 
 export interface AdapterOutput {
   readonly metadata?: JsonObject;
+  /** Omit to report existing paths from the task's `cache.outputs` declaration. */
   readonly outputs?: readonly Artifact[];
 }
 
@@ -104,6 +112,26 @@ export interface TaskResult extends AdapterOutput {
 }
 
 export type TaskStatus = 'cached' | 'cancelled' | 'failed' | 'skipped' | 'success';
+export interface WatchAdapter {
+  watch(context: WatchContext): Promise<void>;
+}
+
+export interface WatchContext {
+  readonly cwd: string;
+  readonly debounceMs?: number;
+  /** Check whether an absolute path should be excluded from watching. */
+  ignore(path: string): boolean;
+  /** Absolute paths to watch. */
+  readonly paths: readonly string[];
+  readonly pollIntervalMs?: number;
+  /**
+   * Pass an empty list for the initial run and cwd-relative paths for subsequent runs.
+   * Await each run before starting another. The optional signal can cancel the active run.
+   */
+  run(changedPaths: readonly string[], signal?: AbortSignal): Promise<void>;
+  readonly signal: AbortSignal;
+}
+
 export interface WatchRunInfo {
   readonly changedPaths: readonly string[];
   readonly number: number;

@@ -3,11 +3,12 @@ import { readFile, realpath } from 'node:fs/promises';
 import { isAbsolute, join, parse, relative, resolve, sep } from 'node:path';
 
 import type { JsonValue, TaskCacheDefinition } from '../core/types.js';
-import type { AdapterOutput, TaskContext } from './types.js';
+import type { PathKind } from './fingerprint.js';
+import type { AdapterOutput, Artifact, TaskContext } from './types.js';
 
 import { renderTemplate } from '../core/template.js';
 import { invalid } from '../core/validation.js';
-import { fingerprintPaths, isFileError } from './fingerprint.js';
+import { fingerprintPaths, isFileError, statWorkspacePath } from './fingerprint.js';
 import { writeJsonFile } from './json-file.js';
 import { normalizeOutput } from './result.js';
 
@@ -33,13 +34,13 @@ interface CacheProbe {
 }
 
 interface PreparedCache extends TaskCacheDefinition {
-  readonly directory: string;
+  readonly directory?: string;
   readonly label: string;
 }
 
 export function prepareCache(
   definition: TaskCacheDefinition,
-  directory: string,
+  directory: string | undefined,
   { cwd, stageId, taskId, variant }: TaskContext,
 ): PreparedCache {
   const variantLabel = variant === undefined ? '' : ` (${variant.id})`;
@@ -59,14 +60,20 @@ export function prepareCache(
       ) {
         invalid(path, 'invalid Windows path segment');
       }
-      if (overlaps(directory, absolute)) {
+      if (directory !== undefined && overlaps(directory, absolute)) {
         invalid(path, 'path overlaps the cache directory');
       }
       return local;
     });
     return [...new Set(entries)].sort();
   };
-  return { ...definition, directory, inputs: paths('inputs'), label, outputs: paths('outputs') };
+  return {
+    ...definition,
+    directory,
+    inputs: directory === undefined ? definition.inputs : paths('inputs'),
+    label,
+    outputs: paths('outputs'),
+  };
 }
 
 export async function probeTaskCache(
@@ -75,6 +82,9 @@ export async function probeTaskCache(
   adapter: string,
   options: JsonValue | undefined,
 ): Promise<CacheProbe | undefined> {
+  if (cache.directory === undefined) {
+    return undefined;
+  }
   const root = await realpath(context.cwd).catch((error) => {
     if (isFileError(error)) {
       return undefined;
@@ -91,15 +101,50 @@ export async function probeTaskCache(
   const file = join(cache.directory, `${key}.json`);
   const entry = await readEntry(file, key, context.signal);
   if (entry !== undefined) {
-    const outputs = await fingerprintPaths(root, cache.outputs, context.signal);
+    const outputs = await fingerprintOutputs(cache, root, context, entry.result);
     if (
-      outputs === entry.outputs &&
+      outputs?.digest === entry.outputs &&
       (await taskKey(cache, root, context, adapter, options)) === key
     ) {
-      return { file, hit: entry.result, key, root };
+      const hit =
+        entry.result.outputs === undefined
+          ? {
+              ...entry.result,
+              outputs: [...outputs.matchedPaths]
+                .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+                .map(([path, kind]) => declaredArtifact(path, kind)),
+            }
+          : entry.result;
+      return { file, hit, key, root };
     }
   }
   return { file, key, root };
+}
+
+export async function reportDeclaredArtifacts(
+  cache: PreparedCache,
+  output: AdapterOutput,
+  { cwd, signal }: TaskContext,
+): Promise<AdapterOutput> {
+  if (output.outputs !== undefined) {
+    return output;
+  }
+  const outputs: Artifact[] = [];
+  for (const path of cache.outputs) {
+    try {
+      const stats = await statWorkspacePath(cwd, path, signal);
+      const kind = stats?.isFile() ? 'file' : stats?.isDirectory() ? 'directory' : undefined;
+      if (kind !== undefined) {
+        outputs.push(declaredArtifact(path, kind));
+      }
+    } catch (error) {
+      signal.throwIfAborted();
+      if (!isFileError(error)) {
+        throw error;
+      }
+    }
+  }
+  return outputs.length === 0 ? output : { ...output, outputs };
 }
 
 export async function saveTaskCache(
@@ -111,7 +156,7 @@ export async function saveTaskCache(
   result: AdapterOutput,
 ): Promise<void> {
   const { signal } = context;
-  const outputs = await fingerprintPaths(probe.root, cache.outputs, signal);
+  const outputs = await fingerprintOutputs(cache, probe.root, context, result);
   if (
     outputs === undefined ||
     (await taskKey(cache, probe.root, context, adapter, options)) !== probe.key
@@ -119,7 +164,7 @@ export async function saveTaskCache(
     return;
   }
   signal.throwIfAborted();
-  const entry: CacheEntry = { key: probe.key, outputs, result, schemaVersion };
+  const entry: CacheEntry = { key: probe.key, outputs: outputs.digest, result, schemaVersion };
   try {
     await writeJsonFile(probe.file, entry);
   } catch (error) {
@@ -157,6 +202,20 @@ function comparable(path: string): string {
   return process.platform === 'win32' ? path.toLowerCase() : path;
 }
 
+function declaredArtifact(path: string, kind: PathKind): Artifact {
+  return { kind, path: path.split(sep).join('/') };
+}
+
+function fingerprintOutputs(
+  cache: PreparedCache,
+  root: string,
+  { cwd, signal }: TaskContext,
+  result: AdapterOutput,
+) {
+  const reported = result.outputs?.map(({ path }) => relative(cwd, resolve(cwd, path)));
+  return fingerprintPaths(root, cache.outputs, signal, reported ?? cache.outputs);
+}
+
 function insideWorkspace(local: string): boolean {
   return local !== '' && local !== '..' && !local.startsWith(`..${sep}`) && !isAbsolute(local);
 }
@@ -190,7 +249,7 @@ async function readEntry(
     return {
       key,
       outputs: entry.outputs,
-      result: normalizeOutput(entry.result as AdapterOutput),
+      result: normalizeOutput(entry.result),
       schemaVersion,
     };
   } catch (error) {
@@ -221,7 +280,7 @@ async function taskKey(
         adapterVersion: cache.version,
         cwd: context.cwd,
         environment: cache.env?.map((name) => [name, env[name] ?? null]),
-        inputs,
+        inputs: inputs.digest,
         options,
         outputs: cache.outputs,
         root,

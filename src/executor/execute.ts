@@ -2,12 +2,18 @@ import { randomUUID } from 'node:crypto';
 import { addAbortListener } from 'node:events';
 import { resolve } from 'node:path';
 
-import type { Plan, PlannedStage, PlannedTask, ResourceLimits, Variant } from '../core/types.js';
+import type {
+  JsonValue,
+  Plan,
+  PlannedStage,
+  PlannedTask,
+  ResourceLimits,
+  Variant,
+} from '../core/types.js';
 import type { CacheOptions } from './cache.js';
 import type { RunFilter } from './filter.js';
 import type { AdapterRegistry } from './registry.js';
 import type {
-  AdapterOutput,
   LifecycleHooks,
   Logger,
   RunResult,
@@ -30,6 +36,7 @@ import {
   defaultCacheDirectory,
   prepareCache,
   probeTaskCache,
+  reportDeclaredArtifacts,
   saveTaskCache,
   validateStageCaches,
 } from './cache.js';
@@ -241,15 +248,15 @@ function listInvocations(
         );
       }
       const cache =
-        active && cacheDirectory !== undefined && task.cache !== undefined
+        active && task.cache !== undefined
           ? prepareCache(task.cache, cacheDirectory, context)
           : undefined;
       return { cache, context: Object.freeze(context), selected: active, task };
     });
   });
-  validateStageCaches(
-    invocations.flatMap((invocation) => (invocation.cache === undefined ? [] : [invocation.cache])),
-  );
+  if (cacheDirectory !== undefined) {
+    validateStageCaches(invocations.flatMap(({ cache }) => (cache === undefined ? [] : [cache])));
+  }
   return invocations;
 }
 
@@ -262,6 +269,23 @@ async function loadAdapter(registry: AdapterRegistry, id: string, signal: AbortS
   } finally {
     listener[Symbol.dispose]();
   }
+}
+
+function mergeOptions(
+  defaults: JsonValue | undefined,
+  options: JsonValue | undefined,
+): JsonValue | undefined {
+  if (
+    typeof defaults === 'object' &&
+    defaults !== null &&
+    !Array.isArray(defaults) &&
+    typeof options === 'object' &&
+    options !== null &&
+    !Array.isArray(options)
+  ) {
+    return { ...defaults, ...options };
+  }
+  return options === undefined ? defaults : options;
 }
 
 async function runStage(
@@ -375,29 +399,32 @@ async function runTask(
     finishedAt: new Date().toISOString(),
     startedAt,
   });
-  const options =
-    task.options === undefined ? undefined : renderOptions(task.options, variant?.values ?? {});
+  const merged = mergeOptions(registry.getDefaults(task.adapter), task.options);
+  const options = merged === undefined ? undefined : renderOptions(merged, variant?.values ?? {});
   await lifecycle.emit('onTaskStart', { ...identity, startedAt }, identity);
   try {
     signal.throwIfAborted();
     const probe =
       cache === undefined ? undefined : await probeTaskCache(cache, context, task.adapter, options);
     signal.throwIfAborted();
-    if (probe?.hit !== undefined) {
-      return { ...probe.hit, ...finish(), status: 'cached' };
+    let output = probe?.hit;
+    const status = output === undefined ? 'success' : 'cached';
+    if (output === undefined) {
+      try {
+        const adapter = await loadAdapter(registry, task.adapter, signal);
+        signal.throwIfAborted();
+        output = normalizeOutput(await adapter.run(context, options));
+      } catch (error) {
+        signal.throwIfAborted();
+        return { ...finish(), error: normalizeError(error), status: 'failed' };
+      }
     }
-    let output: AdapterOutput;
-    try {
-      const adapter = await loadAdapter(registry, task.adapter, signal);
-      signal.throwIfAborted();
-      output = normalizeOutput(await adapter.run(context, options));
-      signal.throwIfAborted();
-    } catch (error) {
-      signal.throwIfAborted();
-      return { ...finish(), error: normalizeError(error), status: 'failed' };
-    }
-    const result: TaskResult = { ...output, ...finish(), status: 'success' };
-    if (cache !== undefined && probe !== undefined) {
+    signal.throwIfAborted();
+    const reported =
+      cache === undefined ? output : await reportDeclaredArtifacts(cache, output, context);
+    signal.throwIfAborted();
+    const result: TaskResult = { ...reported, ...finish(), status };
+    if (status === 'success' && cache !== undefined && probe !== undefined) {
       try {
         await saveTaskCache(cache, probe, context, task.adapter, options, output);
       } catch (error) {

@@ -1,5 +1,10 @@
 import type { MatrixDefinition, StageDefinition, TaskDefinition } from '@dafengzhen/build-matrix';
-import type { ExecuteOptions, ManifestV1, RunResult } from '@dafengzhen/build-matrix/executor';
+import type {
+  AdapterFactory,
+  ExecuteOptions,
+  ManifestV1,
+  RunResult,
+} from '@dafengzhen/build-matrix/executor';
 import type { ExecFileException } from 'node:child_process';
 import type { TestContext } from 'vitest';
 
@@ -221,6 +226,85 @@ it('cache keys track options, variants, versions, declared environment and input
   expect((await run('adapter@2;tool@1', 'changed')).counts.cached).toBe(2);
 });
 
+it('keys the cache by effective adapter options and skips the factory on a hit', async (t) => {
+  const cwd = await workspace(t);
+  const configured = plan([
+    {
+      id: 'build',
+      tasks: [
+        task('compile', {
+          cache: { inputs: [], outputs: ['artifact.txt'], version: '1' },
+          options: { format: 'text' },
+        }),
+      ],
+    },
+  ]);
+  const run = (content: string, factory: AdapterFactory<{ content: string }>) =>
+    executePlan(configured, {
+      cwd,
+      registry: new AdapterRegistry().register('custom', {
+        defaults: { content },
+        factory,
+      }),
+    });
+  const write: AdapterFactory<{ content: string }> = () => ({
+    async run({ cwd }, { content }) {
+      await writeFile(join(cwd, 'artifact.txt'), content);
+      return {};
+    },
+  });
+  expect(cacheStatus(await run('first', write))).toBe('success');
+  expect(
+    cacheStatus(await run('first', () => assert.fail('cache hit must not call the factory'))),
+  ).toBe('cached');
+  expect(cacheStatus(await run('second', write))).toBe('success');
+  expect(await readFile(join(cwd, 'artifact.txt'), 'utf8')).toBe('second');
+});
+
+it.for(['side.txt', 'dist/missing.txt'])(
+  'bypasses cache entries that report an unverified artifact (%s)',
+  async (unverified, t) => {
+    const cwd = await workspace(t);
+    const directory = join(cwd, 'cache');
+    const covered = join(cwd, 'dist', 'bundle.txt');
+    let path = unverified;
+    const registry = new AdapterRegistry().register('custom', () => ({
+      async run() {
+        await mkdir(join(cwd, 'dist'), { recursive: true });
+        await writeFile(covered, 'bundle');
+        await writeFile(join(cwd, 'side.txt'), 'side artifact');
+        return { outputs: [{ kind: 'bundle', path }] };
+      },
+    }));
+    const configured = plan([
+      {
+        id: 'build',
+        tasks: [task('compile', { cache: { inputs: [], outputs: ['dist'], version: '1' } })],
+      },
+    ]);
+    const run = () => executePlan(configured, { cache: { directory }, cwd, registry });
+
+    const first = await run();
+    expect(cacheStatus(first)).toBe('success');
+    expect(first.stages[0].tasks[0].outputs).toStrictEqual([{ kind: 'bundle', path: unverified }]);
+    await expect(readdir(directory)).rejects.toMatchObject({ code: 'ENOENT' });
+
+    path = covered;
+    expect(cacheStatus(await run())).toBe('success');
+    const hit = await run();
+    expect(cacheStatus(hit)).toBe('cached');
+    expect(hit.stages[0].tasks[0].outputs).toStrictEqual([{ kind: 'bundle', path: covered }]);
+
+    const [name] = await readdir(directory);
+    const file = join(directory, name);
+    const entry = JSON.parse(await readFile(file, 'utf8'));
+    entry.result.outputs = [{ path: unverified }];
+    await writeFile(file, JSON.stringify(entry));
+    expect(cacheStatus(await run())).toBe('success');
+    expect(cacheStatus(await run())).toBe('cached');
+  },
+);
+
 it('bypasses corrupt or unavailable cache and never records a failed or unstable build', async (t) => {
   const cwd = await workspace(t);
   const input = join(cwd, 'source.txt');
@@ -351,14 +435,19 @@ it('CLI emits JSON and a matching manifest with cache controls and exit codes', 
   await writeFile(join(cwd, 'input.txt'), 'hello');
   const build = {
     adapter: 'shell',
-    cache: { inputs: ['input.txt'], outputs: ['out-{mode}.txt'], version: 'shell@1;node' },
+    cache: {
+      inputs: ['input.txt'],
+      outputs: ['out-{mode}.txt', 'dist/{mode}'],
+      version: 'shell@1;node',
+    },
     id: 'bundle',
     options: {
       args: [
         '-e',
-        'const fs = require("node:fs"); fs.copyFileSync(process.argv[1], process.argv[2]); console.log("built")',
+        'const fs = require("node:fs"); fs.copyFileSync(process.argv[1], process.argv[2]); fs.mkdirSync(process.argv[3], { recursive: true }); console.log("built")',
         'input.txt',
         'out-{mode}.txt',
+        'dist/{mode}',
       ],
       command: process.execPath,
     },
@@ -388,14 +477,24 @@ it('CLI emits JSON and a matching manifest with cache controls and exit codes', 
     JSON.parse(await readFile(join(cwd, 'reports', 'latest.json'), 'utf8')),
   );
   expect(report.stages[0].tasks.map((item) => item.status)).toStrictEqual(['skipped', 'success']);
+  const outputs = [
+    { kind: 'directory', path: 'dist/build' },
+    { kind: 'file', path: 'out-build.txt' },
+  ];
+  expect(report.stages[0].tasks[0].outputs).toBeUndefined();
+  expect(report.stages[0].tasks[1].outputs).toStrictEqual(outputs);
   expect(await readFile(join(cwd, 'out-build.txt'), 'utf8')).toBe('hello');
   expect((await readdir(join(cwd, 'storage'))).length).toBe(1);
   const second = await exec(process.execPath, args);
-  expect(JSON.parse(second.stdout).counts.cached).toBe(1);
+  const cached: ManifestV1 = JSON.parse(second.stdout);
+  expect(cached.counts.cached).toBe(1);
+  expect(cached.stages[0].tasks[1].outputs).toStrictEqual(outputs);
   expect(second.stderr).toBe('');
-  expect(
-    JSON.parse((await exec(process.execPath, [...args, '--no-cache'])).stdout).counts.success,
-  ).toBe(1);
+  const uncached: ManifestV1 = JSON.parse(
+    (await exec(process.execPath, [...args, '--no-cache'])).stdout,
+  );
+  expect(uncached.counts.success).toBe(1);
+  expect(uncached.stages[0].tasks[1].outputs).toStrictEqual(outputs);
   await expect(
     exec(process.execPath, [cli, file, '--json', '--task', 'unknown']),
   ).rejects.toMatchObject({

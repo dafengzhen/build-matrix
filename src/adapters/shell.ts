@@ -8,23 +8,25 @@ export type ShellOptions = {
   readonly command: string;
 };
 
-const shell: Adapter<ShellOptions> = {
-  async run(context, input) {
-    const options = asRecord(input, 'shell options');
-    checkKeys(options, 'shell options', ['command', 'args']);
-    const command = asNonemptyString(options.command, 'shell options.command');
-    const args =
-      options.args === undefined
-        ? []
-        : asArray(options.args, 'shell options.args').map((arg, index) => {
-            if (typeof arg !== 'string') {
-              invalid(`shell options.args[${index}]`, 'expected a string');
-            }
-            return arg;
-          });
-    await runProcess(context, command, args);
-    return {};
-  },
-};
+export function createShellAdapter(): Adapter<ShellOptions> {
+  return {
+    async run(context, input) {
+      const options = asRecord(input, 'shell options');
+      checkKeys(options, 'shell options', ['command', 'args']);
+      const command = asNonemptyString(options.command, 'shell options.command');
+      const args =
+        options.args === undefined
+          ? []
+          : asArray(options.args, 'shell options.args').map((arg, index) => {
+              if (typeof arg !== 'string') {
+                invalid(`shell options.args[${index}]`, 'expected a string');
+              }
+              return arg;
+            });
+      await runProcess(context, command, args);
+      return {};
+    },
+  };
+}
 
-export default shell;
+export default createShellAdapter();

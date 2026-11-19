@@ -1,7 +1,7 @@
 import type { JsonObject } from '../core/types.js';
 import type { AdapterOutput, TaskError } from './types.js';
 
-import { asArray, asNonemptyString, asRecord, copyJson } from '../core/validation.js';
+import { asArray, asNonemptyString, asRecord, copyJson, invalid } from '../core/validation.js';
 
 export function normalizeError(error: unknown): TaskError {
   try {
@@ -21,7 +21,7 @@ export function normalizeError(error: unknown): TaskError {
   }
 }
 
-export function normalizeOutput(output: AdapterOutput): AdapterOutput {
+export function normalizeOutput(output: unknown): AdapterOutput {
   try {
     const data = asRecord(output, 'adapter output');
     const { metadata, outputs } = data;
@@ -33,6 +33,9 @@ export function normalizeOutput(output: AdapterOutput): AdapterOutput {
               const label = `outputs[${index}]`;
               const artifact = asRecord(item, label);
               const path = asNonemptyString(artifact.path, `${label}.path`);
+              if (path.includes('\0')) {
+                invalid(`${label}.path`, 'path contains a NUL character');
+              }
               const kind =
                 artifact.kind === undefined
                   ? undefined

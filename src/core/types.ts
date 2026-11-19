@@ -48,6 +48,7 @@ export interface StageDefinition {
 export interface TaskCacheDefinition {
   readonly env?: readonly string[];
   readonly inputs: readonly string[];
+  /** Paths fingerprinted for cache reuse and reported when the adapter omits its output list. */
   readonly outputs: readonly string[];
   /** Version fingerprint of the adapter and tools used by this task. */
   readonly version: string;

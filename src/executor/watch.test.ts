@@ -351,6 +351,45 @@ it('watch publishes a cancelled active run before returning', { timeout: 5000 },
   ]);
 });
 
+it('delegates run triggers to the watch adapter and reports each completed run', async (t) => {
+  const cwd = await workspace(t);
+  const signal = new AbortController().signal;
+  const configured = plan([{ id: 'build', tasks: [task('work')] }]);
+  const runs: RunResult[] = [];
+  const manifest = join(cwd, 'reports', 'latest.json');
+  await watchPlan(configured, {
+    cwd,
+    ignore: ['generated'],
+    manifestPath: manifest,
+    manifestVersion: 2,
+    async onRun(result) {
+      const persisted: ManifestV2 = JSON.parse(await readFile(manifest, 'utf8'));
+      expect(persisted.runId).toBe(result.runId);
+      runs.push(result);
+    },
+    paths: ['source'],
+    registry: registryFor(async () => ({})),
+    signal,
+    watchAdapter: {
+      async watch(context) {
+        expect(context.paths).toStrictEqual([join(cwd, 'source')]);
+        expect(context.signal).toBe(signal);
+        expect(context.ignore(join(cwd, 'generated', 'output.txt'))).toBe(true);
+        expect(context.ignore(join(cwd, '.build-matrix-cache', 'cache.json'))).toBe(true);
+        expect(context.ignore(manifest)).toBe(true);
+        expect(context.ignore(join(cwd, 'source', 'input.txt'))).toBe(false);
+        await context.run([]);
+        await context.run([join('source', 'input.txt')]);
+      },
+    },
+  });
+  expect(runs.map((result) => result.watch)).toStrictEqual([
+    { changedPaths: [], number: 1 },
+    { changedPaths: [join('source', 'input.txt')], number: 2 },
+  ]);
+  expect(runs.map((result) => result.status)).toStrictEqual(['success', 'success']);
+});
+
 it(
   'CLI watch emits NDJSON, recovers after a failed round and exits on interruption',
   { timeout: 10_000 },

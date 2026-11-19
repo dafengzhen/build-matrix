@@ -5,7 +5,7 @@ import type {
   TaskDefinition,
   Variant,
 } from '@dafengzhen/build-matrix';
-import type { Adapter } from '@dafengzhen/build-matrix/executor';
+import type { Adapter, AdapterFactory } from '@dafengzhen/build-matrix/executor';
 
 import { ConfigurationError, createPlan } from '@dafengzhen/build-matrix';
 import { AdapterRegistry, executePlan } from '@dafengzhen/build-matrix/executor';
@@ -110,6 +110,50 @@ it('runs stage barriers and a single global invocation with bounded concurrency 
   ]);
   expect(result.stages[0].tasks[1].outputs).toStrictEqual([{ path: 'out/b' }]);
   expect(JSON.parse(JSON.stringify(result))).toStrictEqual(result);
+});
+
+it('shares a lazy factory and applies an immutable snapshot of adapter defaults per task', async () => {
+  let created = 0;
+  const defaults = { args: ['{{target}}'], nested: { flag: true }, target: '{target}' };
+  const factory: AdapterFactory<JsonObject | null> = async () => {
+    created++;
+    return {
+      async run(_context, options) {
+        expect(Object.isFrozen(options)).toBe(true);
+        return { metadata: { options } };
+      },
+    };
+  };
+  const registry = new AdapterRegistry().register('custom', { defaults, factory });
+  defaults.args.push('later');
+  expect(created).toBe(0);
+
+  const result = await executePlan(
+    plan(
+      [
+        {
+          id: 'build',
+          tasks: [
+            task('inherit'),
+            task('override', { options: { args: [], nested: { override: false } } }),
+            task('replace', { options: null }),
+          ],
+        },
+      ],
+      { dimensions: { target: ['a', 'b'] } },
+    ),
+    { maxConcurrency: 6, registry },
+  );
+  expect(result.status).toBe('success');
+  expect(created).toBe(1);
+  expect(result.stages[0].tasks.map((task) => task.metadata?.options)).toStrictEqual([
+    { args: ['{target}'], nested: { flag: true }, target: 'a' },
+    { args: ['{target}'], nested: { flag: true }, target: 'b' },
+    { args: [], nested: { override: false }, target: 'a' },
+    { args: [], nested: { override: false }, target: 'b' },
+    null,
+    null,
+  ]);
 });
 
 it('applies both failure policies and waits for work already started', async () => {

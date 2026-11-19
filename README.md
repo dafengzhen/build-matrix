@@ -58,11 +58,13 @@ The CLI reads `build-matrix.json` in the current directory by default. Pass a pa
 
 ## Adapters
 
-| Adapter | Options and behavior                                                                                                                                                                                                                                                                    |
-| ------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `shell` | `command` is an executable and `args` is an optional array of strings. Arguments are passed directly. To use pipes or redirection, invoke a shell explicitly. Cancellation stops the direct child process.                                                                              |
-| `clean` | `path` is a relative file or directory inside the task working directory. A missing path succeeds. The working directory itself, external paths, and paths through symbolic links or junctions are rejected.                                                                            |
-| `vite`  | Optional `root`, `configFile`, `mode`, and `outDir`. Paths are relative to the task working directory. Each invocation runs one build and reports the supplied output directory if it exists afterwards. Install Vite 8.3.8 or a compatible 8.x release in projects using this adapter. |
+| Adapter | Options and behavior                                                                                                                                                                                                                                                |
+| ------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `shell` | `command` is an executable and `args` is an optional array of strings. Arguments are passed directly. To use pipes or redirection, invoke a shell explicitly. Cancellation stops the direct child process.                                                          |
+| `clean` | `path` is a relative file or directory inside the task working directory. A missing path succeeds. The working directory itself, external paths, and paths through symbolic links or junctions are rejected.                                                        |
+| `vite`  | Optional `root`, `configFile`, `mode`, `outDir`, and `viteConfig`. Each invocation runs one build and reports the directory specified by top-level `outDir` if it exists afterwards. Install Vite 8.3.8 or a compatible 8.x release in projects using this adapter. |
+
+Set `options.viteConfig` to a JSON object containing inline Vite settings, such as `{ "build": { "sourcemap": true } }`. Vite merges it with the project config file using its usual rules. Explicit top-level `root`, `configFile`, `mode`, and `outDir` take precedence. Paths in those top-level options are relative to the task working directory. Paths inside `viteConfig` follow Vite's rules, so a relative `viteConfig.build.outDir` is relative to the Vite project root.
 
 ## Filters and reports
 
@@ -76,6 +78,8 @@ Declare a task's `cache.version`, `cache.inputs`, and `cache.outputs` to reuse s
 
 A cache hit reports `cached` and keeps the existing artifacts. Changes to inputs, outputs, options, variants, the declared cache version, or declared environment variables can cause a rebuild. Update the cache version when upgrading an adapter or tool. Each cached invocation should own its outputs. Overlapping cache boundaries within a stage are rejected, and missing, unreadable, or symlinked paths prevent cache hits. Successful records live in `.build-matrix-cache` by default. Use `--cache-dir <path>` to change that location or `--no-cache` to bypass reads and writes.
 
+When an adapter omits `outputs`, the report lists existing files and directories declared in `cache.outputs`, including with `--no-cache`. An explicit adapter `outputs` list takes precedence. For the result to be cached, each reported artifact must be an existing path covered by `cache.outputs`. Declaring a directory also covers its descendants. A successful task still reports unverified artifacts, and its result is ineligible for cache reuse.
+
 `--watch <path>` runs the pipeline once and reruns it when a watched file changes. Repeat the flag to watch several paths. Directories are scanned recursively. Use `--watch-ignore <path>` to exclude generated files. Scans run every 150 ms by default, with a 200 ms quiet period before rebuilding. Override these defaults with `--poll-interval` and `--debounce`. Changes during a run queue for the next run, and task failures leave the watcher running. Press Ctrl+C to stop.
 
 In watch mode, `--json` emits one JSON object per run and `--manifest` atomically replaces the latest report. The manifest and active cache directory are excluded from watching.
@@ -88,11 +92,14 @@ Use `createPlan` for validation and matrix expansion. Use `executePlan` to run a
 import { createPlan } from '@dafengzhen/build-matrix';
 import { createDefaultRegistry, executePlan } from '@dafengzhen/build-matrix/executor';
 
-const registry = createDefaultRegistry().register('report-mode', () => ({
-  async run({ variant }) {
-    return { metadata: { mode: variant?.values.mode ?? null } };
-  },
-}));
+const registry = createDefaultRegistry().register('report-mode', {
+  defaults: { mode: '{mode}' },
+  factory: () => ({
+    async run(_context, { mode }) {
+      return { metadata: { mode } };
+    },
+  }),
+});
 
 const plan = createPlan({
   matrix: { dimensions: { mode: ['development', 'production'] } },
@@ -107,9 +114,17 @@ const result = await executePlan(plan, {
 console.log(result.counts);
 ```
 
+An adapter factory may be synchronous or asynchronous. The registry creates one instance lazily and shares it across tasks using that registration. The `register(id, loader)` form also accepts a loader that returns an adapter or a module with a default adapter export.
+
+Defaults are JSON values. Omitting task options uses the defaults as supplied. When both values are objects, task fields override defaults at the top level. Arrays, scalars, and `null` replace the entire default when supplied as task options. The executor renders dimension templates after merging and uses the resulting options for the task cache key.
+
+Set defaults for built-ins with `createDefaultRegistry({ shell: { command: 'node' } })`. The built-in adapter subpaths also export `createShellAdapter`, `createCleanAdapter`, and `createViteAdapter` for custom registrations.
+
 Use `createManifest(plan, result)` for schema 1 and `createDetailedReport(plan, result)` for schema 2. Set `manifestVersion: 2` to write schema 2 to disk. Use `cache: { directory: 'cache' }` to change the cache location or `cache: false` to disable it.
 
 `watchPlan(plan, { paths, signal, onRun })` provides watch mode and calls `onRun` after persisting the manifest for that run. Both `executePlan` and `watchPlan` accept asynchronous run, stage, and task start and finish hooks. Task hooks cover scheduled invocations, including cache hits. Hook errors appear in `result.hookErrors` and schema 2 reports.
+
+Supply `watchAdapter` to `watchPlan` to use a different change source. Its `watch(context)` method receives absolute `paths`, an `ignore(path)` predicate, and an abort `signal`. Call and await `context.run([])` for the initial run and `context.run(changedPaths)` for each subsequent batch, with paths relative to `context.cwd`.
 
 ## Examples and development
 
