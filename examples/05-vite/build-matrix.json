@@ -1,0 +1,30 @@
+{
+  "matrix": {
+    "dimensions": {
+      "mode": ["development", "production"]
+    },
+    "idTemplate": "{mode}"
+  },
+  "pipeline": {
+    "stages": [
+      {
+        "id": "build",
+        "tasks": [
+          {
+            "id": "bundle",
+            "adapter": "vite",
+            "options": {
+              "mode": "{mode}",
+              "outDir": "dist/{mode}"
+            },
+            "cache": {
+              "version": "vite-adapter@1;vite@8.3.8",
+              "inputs": ["index.html", "src", "vite.config.js", "package.json"],
+              "outputs": ["dist/{mode}"]
+            }
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -1,0 +1,27 @@
+{
+  "matrix": {
+    "dimensions": {}
+  },
+  "pipeline": {
+    "stages": [
+      {
+        "id": "bundle",
+        "tasks": [
+          {
+            "id": "bundle",
+            "adapter": "shell",
+            "options": {
+              "command": "node",
+              "args": ["build.mjs"]
+            },
+            "cache": {
+              "version": "example@1;node",
+              "inputs": ["src", "build.mjs"],
+              "outputs": ["dist"]
+            }
+          }
+        ]
+      }
+    ]
+  }
+}

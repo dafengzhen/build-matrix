@@ -1,0 +1,103 @@
+{
+  "name": "@dafengzhen/build-matrix",
+  "version": "0.1.0",
+  "description": "Run configurable build matrices and staged pipelines with task adapters, local caching, and file watching.",
+  "keywords": [
+    "build-matrix",
+    "build-pipeline",
+    "build-tool",
+    "cli",
+    "task-runner",
+    "vite"
+  ],
+  "homepage": "https://github.com/dafengzhen/build-matrix#readme",
+  "bugs": {
+    "url": "https://github.com/dafengzhen/build-matrix/issues"
+  },
+  "license": "MIT",
+  "author": "dafengzhen",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/dafengzhen/build-matrix.git"
+  },
+  "bin": {
+    "build-matrix": "./dist/cli/bin.js"
+  },
+  "files": [
+    "dist",
+    "README.zh.md"
+  ],
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./executor": {
+      "types": "./dist/executor/index.d.ts",
+      "default": "./dist/executor/index.js"
+    },
+    "./adapters/shell": {
+      "types": "./dist/adapters/shell.d.ts",
+      "default": "./dist/adapters/shell.js"
+    },
+    "./adapters/clean": {
+      "types": "./dist/adapters/clean.d.ts",
+      "default": "./dist/adapters/clean.js"
+    },
+    "./adapters/vite": {
+      "types": "./dist/adapters/vite.d.ts",
+      "default": "./dist/adapters/vite.js"
+    },
+    "./cli": {
+      "types": "./dist/cli/index.d.ts",
+      "default": "./dist/cli/index.js"
+    }
+  },
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org",
+    "tag": "latest"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "pretest": "npm run build",
+    "test": "vitest run",
+    "pretest:coverage": "npm run build",
+    "test:coverage": "vitest run --coverage",
+    "lint": "oxlint",
+    "lint:fix": "oxlint --fix",
+    "fmt": "oxfmt",
+    "fmt:check": "oxfmt --check",
+    "check:package": "publint",
+    "check": "npm run lint && npm run fmt:check && npm test && tsc -p tsconfig.json && npm run check:package",
+    "commit": "commit",
+    "prepack": "npm run build",
+    "prepublishOnly": "npm run check"
+  },
+  "devDependencies": {
+    "@commitlint/cli": "^21.2.4",
+    "@commitlint/config-conventional": "^21.2.4",
+    "@commitlint/prompt-cli": "^21.2.4",
+    "@types/node": "^26.6.6",
+    "@vitest/coverage-v8": "^5.1.1",
+    "eslint-plugin-perfectionist": "^5.14.0",
+    "oxfmt": "^0.79.0",
+    "oxlint": "^1.94.0",
+    "publint": "^0.3.25",
+    "typescript": "~7.0.2",
+    "vite": "^8.3.8",
+    "vitest": "^5.1.1"
+  },
+  "peerDependencies": {
+    "vite": "^8.3.8"
+  },
+  "peerDependenciesMeta": {
+    "vite": {
+      "optional": true
+    }
+  },
+  "engines": {
+    "node": ">=22.12.0"
+  }
+}

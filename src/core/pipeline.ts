@@ -1,0 +1,133 @@
+import type {
+  DimensionValues,
+  Plan,
+  PlannedStage,
+  PlannedTask,
+  TaskCacheDefinition,
+} from './types.js';
+
+import { expandMatrix } from './matrix.js';
+import { renderOptions, renderTemplate } from './template.js';
+import {
+  asArray,
+  asNonemptyString,
+  asRecord,
+  asResourceGroup,
+  asResourceLimits,
+  checkKeys,
+  copyJson,
+  invalid,
+} from './validation.js';
+
+/** Validate untrusted configuration and make an immutable snapshot for execution. */
+export function createPlan(input: unknown): Plan {
+  const config = asRecord(input, 'config');
+  checkKeys(config, 'config', ['matrix', 'pipeline']);
+  const variants = expandMatrix(config.matrix);
+  const matrix = asRecord(config.matrix, 'matrix');
+  const dimensions = Object.fromEntries(
+    Object.keys(asRecord(matrix.dimensions, 'matrix.dimensions')).map((name) => [name, '']),
+  );
+  const pipeline = asRecord(config.pipeline, 'pipeline');
+  checkKeys(pipeline, 'pipeline', ['stages', 'resourceLimits']);
+  const resourceLimits =
+    pipeline.resourceLimits === undefined
+      ? undefined
+      : asResourceLimits(pipeline.resourceLimits, 'pipeline.resourceLimits');
+  const stageIds = new Set<string>();
+  const taskIds = new Set<string>();
+  const stages = asArray(pipeline.stages, 'pipeline.stages').map((value, index): PlannedStage => {
+    const path = `pipeline.stages[${index}]`;
+    const stage = asRecord(value, path);
+    checkKeys(stage, path, ['id', 'tasks', 'failurePolicy']);
+    const id = uniqueId(stage.id, `${path}.id`, stageIds);
+    const failurePolicy = stage.failurePolicy === undefined ? 'fail-fast' : stage.failurePolicy;
+    if (failurePolicy !== 'fail-fast' && failurePolicy !== 'continue') {
+      invalid(`${path}.failurePolicy`, 'expected "fail-fast" or "continue"');
+    }
+    const tasks = asArray(stage.tasks, `${path}.tasks`).map((value, index): PlannedTask => {
+      const taskPath = `${path}.tasks[${index}]`;
+      const task = asRecord(value, taskPath);
+      checkKeys(task, taskPath, ['id', 'adapter', 'options', 'scope', 'cache', 'resourceGroup']);
+      const id = uniqueId(task.id, `${taskPath}.id`, taskIds);
+      const adapter = asNonemptyString(task.adapter, `${taskPath}.adapter`);
+      const scope = task.scope === undefined ? 'variant' : task.scope;
+      if (scope !== 'variant' && scope !== 'global') {
+        invalid(`${taskPath}.scope`, 'expected "variant" or "global"');
+      }
+      const values = scope === 'variant' ? dimensions : {};
+      const cache =
+        task.cache === undefined
+          ? undefined
+          : cacheDefinition(task.cache, `${taskPath}.cache`, values);
+      const options =
+        task.options === undefined ? undefined : copyJson(task.options, `${taskPath}.options`);
+      const resourceGroup =
+        task.resourceGroup === undefined
+          ? undefined
+          : asResourceGroup(task.resourceGroup, `${taskPath}.resourceGroup`);
+      if (options !== undefined) {
+        renderOptions(options, values, `${taskPath}.options`);
+      }
+      return Object.freeze({
+        adapter,
+        id,
+        scope,
+        ...(options === undefined ? {} : { options }),
+        ...(cache === undefined ? {} : { cache }),
+        ...(resourceGroup === undefined ? {} : { resourceGroup }),
+      });
+    });
+    return Object.freeze({ failurePolicy, id, tasks: Object.freeze(tasks) });
+  });
+  return Object.freeze({
+    stages: Object.freeze(stages),
+    variants,
+    ...(resourceLimits === undefined ? {} : { resourceLimits }),
+  });
+}
+
+function cacheDefinition(
+  input: unknown,
+  path: string,
+  dimensions: DimensionValues,
+): TaskCacheDefinition {
+  const cache = asRecord(input, path);
+  checkKeys(cache, path, ['version', 'inputs', 'outputs', 'env']);
+  const version = asNonemptyString(cache.version, `${path}.version`);
+  const readPaths = (value: unknown, field: string) =>
+    Object.freeze(
+      asArray(value, field).map((item, index) => {
+        const itemPath = `${field}[${index}]`;
+        const template = asNonemptyString(item, itemPath);
+        renderTemplate(template, dimensions, itemPath);
+        return template;
+      }),
+    );
+  const inputs = readPaths(cache.inputs, `${path}.inputs`);
+  const outputs = readPaths(cache.outputs, `${path}.outputs`);
+  if (outputs.length === 0) {
+    invalid(`${path}.outputs`, 'expected at least one output path');
+  }
+  if (cache.env === undefined) {
+    return Object.freeze({ inputs, outputs, version });
+  }
+  const env = asArray(cache.env, `${path}.env`).map((item, index) => {
+    const itemPath = `${path}.env[${index}]`;
+    const name = asNonemptyString(item, itemPath);
+    if (!/^[A-Za-z_][A-Za-z_0-9]*$/.test(name)) {
+      invalid(itemPath, 'invalid environment variable name');
+    }
+    return name;
+  });
+  return Object.freeze({ env: Object.freeze([...new Set(env)].sort()), inputs, outputs, version });
+}
+
+function uniqueId(value: unknown, path: string, ids: Set<string>): string {
+  const id = asNonemptyString(value, path);
+  if (ids.has(id)) {
+    invalid(path, `duplicate ID "${id}"`);
+  }
+  ids.add(id);
+  return id;
+}

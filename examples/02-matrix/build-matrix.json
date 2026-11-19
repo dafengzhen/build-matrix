@@ -1,0 +1,58 @@
+{
+  "matrix": {
+    "dimensions": {
+      "runtime": ["node", "browser"],
+      "format": ["esm", "cjs"]
+    },
+    "exclude": [{ "runtime": "browser", "format": "cjs" }],
+    "include": [{ "runtime": "edge", "format": "esm" }],
+    "idTemplate": "{runtime}-{format}",
+    "maxVariants": 100
+  },
+  "pipeline": {
+    "resourceLimits": {
+      "cpu": 2
+    },
+    "stages": [
+      {
+        "id": "prepare",
+        "tasks": [
+          {
+            "id": "clean",
+            "scope": "global",
+            "adapter": "clean",
+            "options": { "path": "out" }
+          }
+        ]
+      },
+      {
+        "id": "build",
+        "tasks": [
+          {
+            "id": "emit",
+            "adapter": "shell",
+            "resourceGroup": "cpu",
+            "options": {
+              "command": "node",
+              "args": ["build.mjs", "out/{runtime}-{format}.txt", "{runtime}", "{format}"]
+            }
+          }
+        ]
+      },
+      {
+        "id": "report",
+        "tasks": [
+          {
+            "id": "summary",
+            "scope": "global",
+            "adapter": "shell",
+            "options": {
+              "command": "node",
+              "args": ["summary.mjs"]
+            }
+          }
+        ]
+      }
+    ]
+  }
+}

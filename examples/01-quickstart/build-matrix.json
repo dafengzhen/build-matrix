@@ -1,0 +1,22 @@
+{
+  "matrix": {
+    "dimensions": {}
+  },
+  "pipeline": {
+    "stages": [
+      {
+        "id": "hello",
+        "tasks": [
+          {
+            "id": "greet",
+            "adapter": "shell",
+            "options": {
+              "command": "node",
+              "args": ["hello.mjs"]
+            }
+          }
+        ]
+      }
+    ]
+  }
+}
