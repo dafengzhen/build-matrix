@@ -16,7 +16,7 @@ export type ViteOptions = {
 };
 
 const packageRequire = createRequire(import.meta.url);
-const buildScript = fileURLToPath(new URL('./vite-build.js', import.meta.url));
+const buildScript = fileURLToPath(import.meta.resolve('#vite-build'));
 
 function resolveVite(cwd: string): string {
   const projectRequire = createRequire(join(cwd, 'package.json'));

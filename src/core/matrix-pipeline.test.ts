@@ -60,6 +60,37 @@ it('matches all exclusion keys and applies the limit to unique final variants', 
   ).toThrow(/1000 variants/);
 });
 
+it('prunes an exhausted axis and still appends unique explicit combinations', () => {
+  const dimensions = Object.fromEntries(
+    Array.from({ length: 18 }, (_, index) => [`axis${index}`, [0, 1]]),
+  );
+  const names = Object.keys(dimensions);
+  const included = Object.fromEntries(names.map((name) => [name, 0]));
+  const reordered = Object.fromEntries(Object.entries(included).reverse());
+  const variants = expandMatrix({
+    dimensions,
+    exclude: [{ axis17: 0 }, { axis17: 1 }],
+    idTemplate: '{axis0}-{axis17}',
+    include: [reordered, included, { ...included, axis17: 2 }],
+    maxVariants: 2,
+  });
+
+  expect(variants.map(({ id }) => id)).toStrictEqual(['0-0', '0-2']);
+  expect(Object.keys(variants[0].values)).toStrictEqual(names);
+});
+
+it('expands wide matrices without recursion and preserves own dimension properties', () => {
+  const dimensions = Object.fromEntries([
+    ['__proto__', ['safe']],
+    ...Array.from({ length: 12_000 }, (_, index) => [`axis${index}`, [index]]),
+  ]);
+  const [variant] = expandMatrix({ dimensions, idTemplate: '{__proto__}-{axis11999}' });
+
+  expect(variant.id).toBe('safe-11999');
+  expect(Object.getPrototypeOf(variant.values)).toBe(Object.prototype);
+  expect(Object.keys(variant.values)).toStrictEqual(Object.keys(dimensions));
+});
+
 it('validates axes, rules and names, with distinct IDs for mixed and escaped values', () => {
   const dimensions = {
     value: ['1', 1, true, 'true', '', 'a,b=c', '%', '~n1', '\ud800', '\\ud800'],

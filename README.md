@@ -6,7 +6,7 @@ Build Matrix expands build dimensions into variants and runs them through a stag
 
 ## Quick start
 
-Requires Node.js 22.12 or later.
+Requires Node.js 26 or later.
 
 ```sh
 npm install -D @dafengzhen/build-matrix
@@ -115,7 +115,7 @@ Use `createManifest(plan, result)` for schema 1 and `createDetailedReport(plan, 
 
 See the [runnable examples](./examples/README.md) for matrix filtering, caching, watch mode, custom adapters, and Vite builds.
 
-For development, use Node.js 22.13+ on the 22.x line, 24.x, or 26+.
+Development also requires Node.js 26 or later.
 
 ```sh
 npm ci

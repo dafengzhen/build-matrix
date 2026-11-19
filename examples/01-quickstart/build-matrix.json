@@ -12,7 +12,7 @@
             "adapter": "shell",
             "options": {
               "command": "node",
-              "args": ["hello.mjs"]
+              "args": ["hello.ts"]
             }
           }
         ]

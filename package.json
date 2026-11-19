@@ -1,6 +1,6 @@
 {
   "name": "@dafengzhen/build-matrix",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Run configurable build matrices and staged pipelines with task adapters, local caching, and file watching.",
   "keywords": [
     "build-matrix",
@@ -28,6 +28,9 @@
     "README.zh.md"
   ],
   "type": "module",
+  "imports": {
+    "#vite-build": "./dist/adapters/vite-build.js"
+  },
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
@@ -60,7 +63,7 @@
     "tag": "latest"
   },
   "scripts": {
-    "build": "tsc -p tsconfig.build.json",
+    "build": "vite build && tsc -p tsconfig.build.json",
     "pretest": "npm run build",
     "test": "vitest run",
     "pretest:coverage": "npm run build",
@@ -70,7 +73,7 @@
     "fmt": "oxfmt",
     "fmt:check": "oxfmt --check",
     "check:package": "publint",
-    "check": "npm run lint && npm run fmt:check && npm test && tsc -p tsconfig.json && npm run check:package",
+    "check": "npm run lint && npm run fmt:check && npm test && tsc -p tsconfig.json && tsc -p examples/05-vite/tsconfig.json && npm run check:package",
     "commit": "commit",
     "prepack": "npm run build",
     "prepublishOnly": "npm run check"
@@ -98,6 +101,6 @@
     }
   },
   "engines": {
-    "node": ">=22.12.0"
+    "node": ">=26.0.0"
   }
 }

@@ -2,7 +2,7 @@
 
 [English](./README.md) · [项目说明](../README.zh.md)
 
-使用 Node.js 22.13 及以上的 22.x 版本、24.x，或 26 及以上版本。以下命令均在仓库根目录运行，CLI 任务以配置文件所在目录为工作目录。
+请使用 Node.js 26 或更高版本。以下命令均在仓库根目录运行，CLI 任务以配置文件所在目录为工作目录。
 
 ```sh
 npm ci
@@ -24,7 +24,7 @@ node dist/cli/bin.js --help
 node dist/cli/bin.js examples/01-quickstart/build-matrix.json
 ```
 
-[配置](./01-quickstart/build-matrix.json)中的维度表为空，因此会产生一个 ID 为 `default` 的变体。`greet` 任务通过 `shell` 适配器运行 [hello.mjs](./01-quickstart/hello.mjs)，生成 `examples/01-quickstart/out/hello.txt`。任务日志写入标准错误，标准输出的报告中会显示 `[success] greet (default)`。
+[配置](./01-quickstart/build-matrix.json)中的维度表为空，因此会产生一个 ID 为 `default` 的变体。`greet` 任务通过 `shell` 适配器运行 [hello.ts](./01-quickstart/hello.ts)，生成 `examples/01-quickstart/out/hello.txt`。任务日志写入标准错误，标准输出的报告中会显示 `[success] greet (default)`。
 
 ## 02 矩阵、过滤和资源组
 
@@ -34,7 +34,7 @@ node dist/cli/bin.js examples/02-matrix/build-matrix.json --max-concurrency 4
 
 [配置](./02-matrix/build-matrix.json)组合 `runtime` 和 `format`，排除 `browser-cjs`，追加 `edge-esm`，并用 `{runtime}-{format}` 生成 ID。最终顺序为 `node-esm`、`node-cjs`、`browser-esm`、`edge-esm`。
 
-`prepare` 阶段清理一次 `out/`。`build` 阶段把各变体的值替换到 [build.mjs](./02-matrix/build.mjs) 的参数中，每个变体生成一个文件。最后，全局任务 `summary` 列出文件。`cpu` 资源组允许最多两个 `emit` 调用并发执行。即使阶段总并发上限为 4，使用 `--resource cpu=1` 也可让这一组串行执行。
+`prepare` 阶段清理一次 `out/`。`build` 阶段把各变体的值替换到 [build.ts](./02-matrix/build.ts) 的参数中，每个变体生成一个文件。最后，全局任务 `summary` 列出文件。`cpu` 资源组允许最多两个 `emit` 调用并发执行。即使阶段总并发上限为 4，使用 `--resource cpu=1` 也可让这一组串行执行。
 
 ```sh
 node dist/cli/bin.js examples/02-matrix/build-matrix.json --variant node-esm --task emit --json --detailed --manifest reports/run.json
@@ -49,10 +49,10 @@ node dist/cli/bin.js examples/03-cache-watch/build-matrix.json
 node dist/cli/bin.js examples/03-cache-watch/build-matrix.json
 ```
 
-[配置](./03-cache-watch/build-matrix.json)将 `src/` 和 [build.mjs](./03-cache-watch/build.mjs) 声明为缓存输入。首次运行时，脚本将源文本合并到 `examples/03-cache-watch/dist/bundle.txt`。输入和产物保持不变时，再次运行会显示 `[cached] bundle (default)`。用 `--no-cache` 强制执行并跳过缓存读写，或用 `--cache-dir <path>` 指定缓存目录。
+[配置](./03-cache-watch/build-matrix.json)将 `src/` 和 [build.ts](./03-cache-watch/build.ts) 声明为缓存输入。首次运行时，脚本将源文本合并到 `examples/03-cache-watch/dist/bundle.txt`。输入和产物保持不变时，再次运行会显示 `[cached] bundle (default)`。用 `--no-cache` 强制执行并跳过缓存读写，或用 `--cache-dir <path>` 指定缓存目录。
 
 ```sh
-node dist/cli/bin.js examples/03-cache-watch/build-matrix.json --watch src --watch build.mjs --json --detailed --manifest reports/latest.json
+node dist/cli/bin.js examples/03-cache-watch/build-matrix.json --watch src --watch build.ts --json --detailed --manifest reports/latest.json
 ```
 
 首次运行完成后，修改并保存 `examples/03-cache-watch/src/a.txt` 以触发重建。每轮输出一行 JSON，并更新 `examples/03-cache-watch/reports/latest.json`。报告中的 `watch` 字段记录轮次和变化路径。按 Ctrl+C 停止监听。监听目录包含生成文件时，可用 `--watch-ignore` 排除它们。
@@ -60,10 +60,10 @@ node dist/cli/bin.js examples/03-cache-watch/build-matrix.json --watch src --wat
 ## 04 编程接口
 
 ```sh
-node examples/04-programmatic/run.mjs
+node examples/04-programmatic/run.ts
 ```
 
-[脚本](./04-programmatic/run.mjs)从 `@dafengzhen/build-matrix` 导入 `createPlan`，从 `@dafengzhen/build-matrix/executor` 导入注册表和执行器。自定义适配器 `report-mode` 将当前模式作为 JSON 元数据返回。`onTaskFinish` 钩子打印各变体的元数据，最终汇总显示两个调用成功。
+[脚本](./04-programmatic/run.ts)从 `@dafengzhen/build-matrix` 导入 `createPlan`，从 `@dafengzhen/build-matrix/executor` 导入注册表和执行器。自定义适配器 `report-mode` 将当前模式作为 JSON 元数据返回。`onTaskFinish` 钩子打印各变体的元数据，最终汇总显示两个调用成功。
 
 适配器实现 `run(context, options)`，可以返回 `{ outputs, metadata }`。上下文包含变体、工作目录和取消信号。[API 说明](../README.zh.md#javascript-和-typescript-api)还介绍了报告生成和程序化监听。
 

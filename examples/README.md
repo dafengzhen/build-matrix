@@ -2,7 +2,7 @@
 
 [简体中文](./README.zh.md) · [Project README](../README.md)
 
-Run these commands from the repository root with Node.js 22.13+ on the 22.x line, 24.x, or 26+. CLI tasks use the configuration directory as their working directory.
+Run these commands from the repository root with Node.js 26 or later. CLI tasks use the configuration directory as their working directory.
 
 ```sh
 npm ci
@@ -24,7 +24,7 @@ node dist/cli/bin.js --help
 node dist/cli/bin.js examples/01-quickstart/build-matrix.json
 ```
 
-The [configuration](./01-quickstart/build-matrix.json) has an empty dimension map, so it produces one variant with the ID `default`. The `greet` task runs [hello.mjs](./01-quickstart/hello.mjs) through the `shell` adapter and writes `examples/01-quickstart/out/hello.txt`. The task's log goes to stderr, and its status appears as `[success] greet (default)` in the stdout report.
+The [configuration](./01-quickstart/build-matrix.json) has an empty dimension map, so it produces one variant with the ID `default`. The `greet` task runs [hello.ts](./01-quickstart/hello.ts) through the `shell` adapter and writes `examples/01-quickstart/out/hello.txt`. The task's log goes to stderr, and its status appears as `[success] greet (default)` in the stdout report.
 
 ## 02 Matrix, filters, and resource groups
 
@@ -34,7 +34,7 @@ node dist/cli/bin.js examples/02-matrix/build-matrix.json --max-concurrency 4
 
 The [configuration](./02-matrix/build-matrix.json) combines `runtime` with `format`. It excludes `browser-cjs`, appends `edge-esm`, and uses `{runtime}-{format}` for IDs. The resulting order is `node-esm`, `node-cjs`, `browser-esm`, and `edge-esm`.
 
-The `prepare` stage clears `out/` once. The `build` stage substitutes each variant's values into the arguments to [build.mjs](./02-matrix/build.mjs) and writes one file per variant. The global `summary` task then lists the files. The `cpu` resource group limits the `emit` tasks to two concurrent invocations. Use `--resource cpu=1` to run them one at a time, even when the stage allows four.
+The `prepare` stage clears `out/` once. The `build` stage substitutes each variant's values into the arguments to [build.ts](./02-matrix/build.ts) and writes one file per variant. The global `summary` task then lists the files. The `cpu` resource group limits the `emit` tasks to two concurrent invocations. Use `--resource cpu=1` to run them one at a time, even when the stage allows four.
 
 ```sh
 node dist/cli/bin.js examples/02-matrix/build-matrix.json --variant node-esm --task emit --json --detailed --manifest reports/run.json
@@ -49,10 +49,10 @@ node dist/cli/bin.js examples/03-cache-watch/build-matrix.json
 node dist/cli/bin.js examples/03-cache-watch/build-matrix.json
 ```
 
-The [configuration](./03-cache-watch/build-matrix.json) fingerprints `src/` and [build.mjs](./03-cache-watch/build.mjs). On a fresh run, the script joins the text files into `examples/03-cache-watch/dist/bundle.txt`. Running again with the same inputs and output reports `[cached] bundle (default)`. Use `--no-cache` to force execution without reading or writing cache records, or `--cache-dir <path>` to store them elsewhere.
+The [configuration](./03-cache-watch/build-matrix.json) fingerprints `src/` and [build.ts](./03-cache-watch/build.ts). On a fresh run, the script joins the text files into `examples/03-cache-watch/dist/bundle.txt`. Running again with the same inputs and output reports `[cached] bundle (default)`. Use `--no-cache` to force execution without reading or writing cache records, or `--cache-dir <path>` to store them elsewhere.
 
 ```sh
-node dist/cli/bin.js examples/03-cache-watch/build-matrix.json --watch src --watch build.mjs --json --detailed --manifest reports/latest.json
+node dist/cli/bin.js examples/03-cache-watch/build-matrix.json --watch src --watch build.ts --json --detailed --manifest reports/latest.json
 ```
 
 After the initial run, edit and save `examples/03-cache-watch/src/a.txt` to trigger a rebuild. Each run prints one JSON line and updates `examples/03-cache-watch/reports/latest.json`. The report's `watch` field shows the run number and changed paths. Press Ctrl+C to stop. Use `--watch-ignore` when watching any directory that also contains generated output.
@@ -60,10 +60,10 @@ After the initial run, edit and save `examples/03-cache-watch/src/a.txt` to trig
 ## 04 Programmatic API
 
 ```sh
-node examples/04-programmatic/run.mjs
+node examples/04-programmatic/run.ts
 ```
 
-The [script](./04-programmatic/run.mjs) imports `createPlan` from `@dafengzhen/build-matrix` and the registry and executor from `@dafengzhen/build-matrix/executor`. It registers `report-mode`, which returns the current mode as JSON metadata. The `onTaskFinish` hook logs each variant's metadata, and the final counts show two successful invocations.
+The [script](./04-programmatic/run.ts) imports `createPlan` from `@dafengzhen/build-matrix` and the registry and executor from `@dafengzhen/build-matrix/executor`. It registers `report-mode`, which returns the current mode as JSON metadata. The `onTaskFinish` hook logs each variant's metadata, and the final counts show two successful invocations.
 
 An adapter implements `run(context, options)` and can return `{ outputs, metadata }`. The context provides the variant, working directory, and cancellation signal. The [API overview](../README.md#javascript-and-typescript-api) also covers report creation and programmatic watch mode.
 

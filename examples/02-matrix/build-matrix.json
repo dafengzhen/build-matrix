@@ -34,7 +34,7 @@
             "resourceGroup": "cpu",
             "options": {
               "command": "node",
-              "args": ["build.mjs", "out/{runtime}-{format}.txt", "{runtime}", "{format}"]
+              "args": ["build.ts", "out/{runtime}-{format}.txt", "{runtime}", "{format}"]
             }
           }
         ]
@@ -48,7 +48,7 @@
             "adapter": "shell",
             "options": {
               "command": "node",
-              "args": ["summary.mjs"]
+              "args": ["summary.ts"]
             }
           }
         ]

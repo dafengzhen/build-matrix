@@ -12,11 +12,11 @@
             "adapter": "shell",
             "options": {
               "command": "node",
-              "args": ["build.mjs"]
+              "args": ["build.ts"]
             },
             "cache": {
               "version": "example@1;node",
-              "inputs": ["src", "build.mjs"],
+              "inputs": ["src", "build.ts"],
               "outputs": ["dist"]
             }
           }

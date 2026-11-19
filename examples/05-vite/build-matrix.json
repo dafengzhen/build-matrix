@@ -19,7 +19,7 @@
             },
             "cache": {
               "version": "vite-adapter@1;vite@8.3.8",
-              "inputs": ["index.html", "src", "vite.config.js", "package.json"],
+              "inputs": ["index.html", "src", "tsconfig.json", "vite.config.ts", "package.json"],
               "outputs": ["dist/{mode}"]
             }
           }

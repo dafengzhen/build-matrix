@@ -6,7 +6,7 @@ Build Matrix 将构建维度展开为变体，按阶段执行任务。可以用 
 
 ## 快速开始
 
-需要 Node.js 22.12 或更高版本。
+需要 Node.js 26 或更高版本。
 
 ```sh
 npm install -D @dafengzhen/build-matrix
@@ -115,7 +115,7 @@ console.log(result.counts);
 
 [可运行示例](./examples/README.zh.md) 涵盖矩阵过滤、缓存、文件监听、自定义适配器和 Vite 构建。
 
-开发本仓库时，请使用 Node.js 22.13 及以上的 22.x 版本、24.x，或 26 及以上版本。
+开发本仓库也需要 Node.js 26 或更高版本。
 
 ```sh
 npm ci
