@@ -1,7 +1,7 @@
-import { mkdtempDisposable, readFile, stat } from 'node:fs/promises';
+import { mkdtempDisposable, readFile, realpath, stat } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
-import { join, relative, resolve, sep } from 'node:path';
+import { isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 import type { JsonObject } from '../core/types.js';
@@ -100,19 +100,21 @@ export function createViteAdapter(): Adapter<undefined | ViteOptions> {
       }
       const built = new Set(report.environments);
       const legacyOutDir = selection === undefined && built.size === 1 ? options.outDir : undefined;
+      const physicalCwd = declared === undefined ? await realpath(cwd) : cwd;
       const candidates =
         declared?.filter(
           ({ environment }) => environment === undefined || built.has(environment),
         ) ??
         report.outputs.map(({ environment, kind, path }) => {
+          const local = relativeOutputPath(cwd, physicalCwd, path);
           if (
             typeof legacyOutDir === 'string' &&
             resolved.outDir !== undefined &&
-            relative(resolved.outDir, path) === ''
+            relative(resolved.outDir, resolve(cwd, local)) === ''
           ) {
             return { kind, path: legacyOutDir };
           }
-          return { environment, kind, path: (relative(cwd, path) || '.').split(sep).join('/') };
+          return { environment, kind, path: (local || '.').split(sep).join('/') };
         });
       return { outputs: await collectOutputs(context, candidates, declared !== undefined) };
     },
@@ -166,6 +168,10 @@ async function collectOutputs(
   return outputs;
 }
 
+function isWithinCwd(local: string): boolean {
+  return local !== '..' && !local.startsWith(`..${sep}`) && !isAbsolute(local);
+}
+
 function readEnvironments(value: unknown): 'all' | readonly string[] {
   const label = 'vite options.environments';
   if (value === 'all') {
@@ -201,6 +207,16 @@ function readOutputs(value: unknown): readonly ViteOutput[] {
       path: asPath(path, `${field}.path`),
     };
   });
+}
+
+function relativeOutputPath(cwd: string, physicalCwd: string, path: string): string {
+  const local = relative(cwd, path);
+  if (isWithinCwd(local)) {
+    return local;
+  }
+  // Vite can report the physical path even when cwd uses a short name or a directory link.
+  const physical = relative(physicalCwd, path);
+  return isWithinCwd(physical) ? physical : local;
 }
 
 function resolveVite(root: string, cwd: string): string {

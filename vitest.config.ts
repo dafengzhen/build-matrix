@@ -9,5 +9,7 @@ export default defineConfig({
     },
     dir: 'src',
     environment: 'node',
+    execArgv: ['--no-global-search-paths'],
+    globalSetup: './vitest.setup.ts',
   },
 });

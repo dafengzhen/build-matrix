@@ -21,7 +21,7 @@
     "url": "git+https://github.com/dafengzhen/build-matrix.git"
   },
   "bin": {
-    "build-matrix": "./dist/cli/bin.js"
+    "build-matrix": "dist/cli/bin.js"
   },
   "files": [
     "dist",
@@ -64,9 +64,7 @@
   },
   "scripts": {
     "build": "vite build && tsc -p tsconfig.build.json",
-    "pretest": "npm run build",
     "test": "vitest run",
-    "pretest:coverage": "npm run build",
     "test:coverage": "vitest run --coverage",
     "lint": "oxlint",
     "lint:fix": "oxlint --fix",

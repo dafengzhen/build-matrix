@@ -237,6 +237,42 @@ it(
   },
 );
 
+it('reports inferred Vite outputs relative to a linked task directory', async (t) => {
+  const parent = await workspace(t);
+  const root = join(parent, 'project');
+  const cwd = join(parent, 'linked');
+  await mkdir(root);
+  try {
+    await symlink(root, cwd, process.platform === 'win32' ? 'junction' : 'dir');
+  } catch (error) {
+    if (!(error instanceof Error) || !('code' in error) || error.code !== 'EPERM') {
+      throw error;
+    }
+    await rm(parent, { force: true, recursive: true });
+    t.skip('current environment does not permit creating a symbolic link');
+  }
+  await writeFile(join(root, 'index.html'), '<p>Build Matrix</p>');
+  const plan = makePlan([
+    {
+      id: 'build',
+      tasks: [
+        {
+          adapter: 'vite',
+          cache: { inputs: ['index.html'], outputs: ['dist'], version: '1' },
+          id: 'bundle',
+          options: { environments: 'client', root: '../project' },
+        },
+      ],
+    },
+  ]);
+  const result = await executePlan(plan, { cwd, signal: t.signal });
+  expect(result.stages[0].tasks[0].outputs).toStrictEqual([
+    { environment: 'client', kind: 'directory', path: 'dist' },
+  ]);
+  const cached = await executePlan(plan, { cwd, signal: t.signal });
+  expect(cached.counts.cached).toBe(1);
+});
+
 it(
   'validates Vite output declarations and cache coverage and restores environment metadata',
   { timeout: 30_000 },
@@ -476,6 +512,7 @@ it('the compiled package works without Vite until that adapter runs', async (t) 
     node,
     [
       '--input-type=module',
+      '--no-global-search-paths',
       '-e',
       `
     import assert from 'node:assert/strict'
