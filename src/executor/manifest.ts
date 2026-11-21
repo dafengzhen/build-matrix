@@ -10,6 +10,7 @@ import type {
 } from './types.js';
 
 import { writeJsonFile } from './json-file.js';
+import { createTaskCounts } from './result.js';
 
 export interface ManifestV1 {
   readonly counts: RunResult['counts'];
@@ -40,10 +41,13 @@ export interface ManifestV2 extends Omit<ManifestV1, 'schemaVersion' | 'stages'>
   readonly watch?: WatchRunInfo;
 }
 
+type GroupMetrics = { id: string } & Metrics;
+
+type Metrics = ReturnType<typeof emptyMetrics>;
+
 interface ReportBreakdown extends ReportMetrics {
   readonly id: string;
 }
-
 interface ReportMetrics {
   readonly artifactCount: number;
   readonly counts: RunResult['counts'];
@@ -52,31 +56,37 @@ interface ReportMetrics {
 
 /** Include scheduler, artifact, timing, watch and hook diagnostics in the version 2 report. */
 export function createDetailedReport(plan: Plan, result: RunResult): ManifestV2 {
-  const base = createManifest(plan, result);
-  const allTasks = result.stages.flatMap((stage) => stage.tasks);
-  const stages = base.stages.map((stage, index) => {
-    const { durationMs, finishedAt, startedAt, tasks } = result.stages[index];
+  const totals = emptyMetrics();
+  const byAdapter = new Map<string, GroupMetrics>();
+  const byResourceGroup = new Map<string, GroupMetrics>();
+  const stages = result.stages.map(({ durationMs, finishedAt, id, startedAt, status, tasks }) => {
+    const metrics = emptyMetrics();
+    const projected = tasks.map((task) => {
+      const { adapter, resourceGroup } = task;
+      recordTask(metrics, task);
+      recordTask(totals, task);
+      recordTask(groupMetrics(byAdapter, adapter), task);
+      if (resourceGroup !== undefined) {
+        recordTask(groupMetrics(byResourceGroup, resourceGroup), task);
+      }
+      return manifestTask(task, true);
+    });
     return {
-      id: stage.id,
-      status: stage.status,
+      id,
+      status,
       ...(startedAt === undefined ? {} : { durationMs, finishedAt, startedAt }),
-      tasks: stage.tasks.map((task, taskIndex) => {
-        const { resourceGroup } = tasks[taskIndex];
-        return resourceGroup === undefined ? task : { ...task, resourceGroup };
-      }),
-      ...metrics(tasks),
+      tasks: projected,
+      ...metrics,
     };
   });
   const { scheduling, watch } = result;
   return {
-    ...base,
+    ...createReport(plan, result, 2, stages),
     metrics: {
-      ...metrics(allTasks),
-      byAdapter: breakdown(allTasks, 'adapter'),
-      byResourceGroup: breakdown(allTasks, 'resourceGroup'),
+      ...totals,
+      byAdapter: [...byAdapter.values()],
+      byResourceGroup: [...byResourceGroup.values()],
     },
-    schemaVersion: 2,
-    stages,
     ...(scheduling === undefined
       ? {}
       : {
@@ -100,7 +110,28 @@ export function createDetailedReport(plan: Plan, result: RunResult): ManifestV2 
 
 /** Project an execution report into the stable version 1 JSON format. */
 export function createManifest(plan: Plan, result: RunResult): ManifestV1 {
-  const { counts, durationMs, finishedAt, runId, stages, startedAt, status } = result;
+  const stages = result.stages.map(({ id, status, tasks }) => ({
+    id,
+    status,
+    tasks: tasks.map((task) => manifestTask(task)),
+  }));
+  return createReport(plan, result, 1, stages);
+}
+
+export async function writeManifest(
+  path: string,
+  manifest: ManifestV1 | ManifestV2,
+): Promise<void> {
+  await writeJsonFile(path, manifest, true);
+}
+
+function createReport<Version extends 1 | 2, Stage extends StageResult>(
+  plan: Plan,
+  result: RunResult,
+  schemaVersion: Version,
+  stages: readonly Stage[],
+) {
+  const { counts, durationMs, finishedAt, runId, startedAt, status } = result;
   return {
     counts: {
       cached: counts.cached,
@@ -117,39 +148,25 @@ export function createManifest(plan: Plan, result: RunResult): ManifestV1 {
       variantCount: plan.variants.length,
     },
     runId,
-    schemaVersion: 1,
-    stages: stages.map(({ id, status, tasks }) => ({ id, status, tasks: tasks.map(manifestTask) })),
+    schemaVersion,
+    stages,
     startedAt,
     status,
     variants: plan.variants.map(({ id, values }) => ({ id, values })),
   };
 }
 
-export async function writeManifest(
-  path: string,
-  manifest: ManifestV1 | ManifestV2,
-): Promise<void> {
-  await writeJsonFile(path, manifest, true);
+function emptyMetrics() {
+  return { artifactCount: 0, counts: createTaskCounts(), taskDurationMs: 0 };
 }
 
-function breakdown(
-  tasks: readonly TaskResult[],
-  field: 'adapter' | 'resourceGroup',
-): ReportBreakdown[] {
-  const groups = new Map<string, TaskResult[]>();
-  for (const task of tasks) {
-    const id = task[field];
-    if (id === undefined) {
-      continue;
-    }
-    const group = groups.get(id);
-    if (group === undefined) {
-      groups.set(id, [task]);
-    } else {
-      group.push(task);
-    }
+function groupMetrics(groups: Map<string, GroupMetrics>, id: string): GroupMetrics {
+  let metrics = groups.get(id);
+  if (metrics === undefined) {
+    metrics = { id, ...emptyMetrics() };
+    groups.set(id, metrics);
   }
-  return [...groups].map(([id, group]) => ({ id, ...metrics(group) }));
+  return metrics;
 }
 
 function manifestError({ code, message, name, stack }: TaskError): TaskError {
@@ -161,7 +178,7 @@ function manifestError({ code, message, name, stack }: TaskError): TaskError {
   };
 }
 
-function manifestTask(task: TaskResult): TaskResult {
+function manifestTask(task: TaskResult, detailed = false): TaskResult {
   const {
     adapter,
     durationMs,
@@ -169,6 +186,7 @@ function manifestTask(task: TaskResult): TaskResult {
     finishedAt,
     metadata,
     outputs,
+    resourceGroup,
     runId,
     skipReason,
     stageId,
@@ -199,17 +217,12 @@ function manifestTask(task: TaskResult): TaskResult {
         }),
     ...(metadata === undefined ? {} : { metadata }),
     ...(error === undefined ? {} : { error: manifestError(error) }),
+    ...(detailed && resourceGroup !== undefined ? { resourceGroup } : {}),
   };
 }
 
-function metrics(tasks: readonly TaskResult[]): ReportMetrics {
-  const counts = { cached: 0, cancelled: 0, failed: 0, skipped: 0, success: 0 };
-  let artifactCount = 0;
-  let taskDurationMs = 0;
-  for (const { durationMs, outputs, status } of tasks) {
-    counts[status]++;
-    artifactCount += outputs?.length ?? 0;
-    taskDurationMs += durationMs ?? 0;
-  }
-  return { artifactCount, counts, taskDurationMs };
+function recordTask(metrics: Metrics, { durationMs, outputs, status }: TaskResult) {
+  metrics.counts[status]++;
+  metrics.artifactCount += outputs?.length ?? 0;
+  metrics.taskDurationMs += durationMs ?? 0;
 }

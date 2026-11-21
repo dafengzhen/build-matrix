@@ -79,6 +79,24 @@ it('prunes an exhausted axis and still appends unique explicit combinations', ()
   expect(Object.keys(variants[0].values)).toStrictEqual(names);
 });
 
+it('indexes compound excludes by the last declared dimension and its typed value', () => {
+  const variants = expandMatrix({
+    dimensions: { mode: ['a', 'b'], target: [1, '1', 2] },
+    exclude: [{ mode: 'a', target: 1 }, { mode: 'b', target: '1' }, { target: 2 }],
+    include: [
+      { mode: 'a', target: 1 },
+      { mode: 'b', target: 1 },
+      { mode: 'a', target: 1 },
+    ],
+  });
+
+  expect(variants.map(({ values }) => values)).toStrictEqual([
+    { mode: 'a', target: '1' },
+    { mode: 'b', target: 1 },
+    { mode: 'a', target: 1 },
+  ]);
+});
+
 it('expands wide matrices without recursion and preserves own dimension properties', () => {
   const dimensions = Object.fromEntries([
     ['__proto__', ['safe']],

@@ -13,6 +13,7 @@ import type {
 import type { CacheOptions } from './cache.js';
 import type { RunFilter } from './filter.js';
 import type { AdapterRegistry } from './registry.js';
+import type { ScheduledTask } from './scheduler.js';
 import type {
   LifecycleHooks,
   Logger,
@@ -21,17 +22,11 @@ import type {
   StageResult,
   TaskContext,
   TaskResult,
-  TaskStatus,
   WatchRunInfo,
 } from './types.js';
 
 import { renderOptions } from '../core/template.js';
-import {
-  asNonemptyString,
-  asPositiveInteger,
-  asResourceLimits,
-  invalid,
-} from '../core/validation.js';
+import { asPath, asPositiveInteger, asResourceLimits, invalid } from '../core/validation.js';
 import {
   defaultCacheDirectory,
   prepareCache,
@@ -44,7 +39,8 @@ import { selectInvocations } from './filter.js';
 import { createLifecycle } from './lifecycle.js';
 import { createDetailedReport, createManifest, writeManifest } from './manifest.js';
 import { createDefaultRegistry } from './registry.js';
-import { normalizeError, normalizeOutput } from './result.js';
+import { createTaskCounts, normalizeError, normalizeOutput } from './result.js';
+import { StageScheduler } from './scheduler.js';
 
 export interface ExecuteOptions {
   readonly cache?: CacheOptions | false;
@@ -70,13 +66,6 @@ interface Invocation {
 const quietLogger: Logger = { error() {}, info() {} };
 type Lifecycle = ReturnType<typeof createLifecycle>;
 
-interface ResourceQueue {
-  active: number;
-  readonly indices: number[];
-  readonly limit: number;
-  next: number;
-}
-
 /** Execute a plan produced by createPlan, retaining declaration order in the report. */
 export function executePlan(plan: Plan, options: ExecuteOptions = {}): Promise<RunResult> {
   return runPlan(plan, options);
@@ -92,8 +81,7 @@ export async function runPlan(
     options.maxConcurrency === undefined
       ? 1
       : asPositiveInteger(options.maxConcurrency, 'maxConcurrency');
-  const cwd =
-    options.cwd === undefined ? process.cwd() : resolve(asNonemptyString(options.cwd, 'cwd'));
+  const cwd = options.cwd === undefined ? process.cwd() : resolve(asPath(options.cwd, 'cwd'));
   const signal = options.signal ?? new AbortController().signal;
   const logger = options.logger ?? quietLogger;
   const selected = selectInvocations(plan, options.filter);
@@ -107,20 +95,11 @@ export async function runPlan(
   const cacheDirectory =
     options.cache === false
       ? undefined
-      : resolve(
-          cwd,
-          asNonemptyString(options.cache?.directory ?? defaultCacheDirectory, 'cache.directory'),
-        );
+      : resolve(cwd, asPath(options.cache?.directory ?? defaultCacheDirectory, 'cache.directory'));
   const manifestPath =
     options.manifestPath === undefined
       ? undefined
-      : resolve(cwd, asNonemptyString(options.manifestPath, 'manifestPath'));
-  if (cacheDirectory?.includes('\0')) {
-    invalid('cache.directory', 'path contains a NUL character');
-  }
-  if (manifestPath?.includes('\0')) {
-    invalid('manifestPath', 'path contains a NUL character');
-  }
+      : resolve(cwd, asPath(options.manifestPath, 'manifestPath'));
   const manifestVersion = options.manifestVersion ?? 1;
   if (manifestVersion !== 1 && manifestVersion !== 2) {
     invalid('manifestVersion', 'expected 1 or 2');
@@ -140,13 +119,7 @@ export async function runPlan(
   }));
   const startedAt = new Date().toISOString();
   const started = performance.now();
-  const counts: Record<TaskStatus, number> = {
-    cached: 0,
-    cancelled: 0,
-    failed: 0,
-    skipped: 0,
-    success: 0,
-  };
+  const counts = createTaskCounts();
   const stages: StageResult[] = [];
   const watchInfo = watch === undefined ? {} : { watch };
   await lifecycle.emit('onRunStart', { runId, scheduling, startedAt, ...watchInfo });
@@ -301,33 +274,15 @@ async function runStage(
   lifecycle: Lifecycle,
 ): Promise<StageResult> {
   const results: (TaskResult | undefined)[] = [];
-  const queues = new Map<string | undefined, ResourceQueue>();
-  invocations.forEach(({ selected, task }, index) => {
-    if (!selected) {
-      return;
-    }
-    const group = task.resourceGroup;
-    let queue = queues.get(group);
-    if (queue === undefined) {
-      queue = {
-        active: 0,
-        indices: [],
-        limit: group === undefined ? scheduling.maxConcurrency : scheduling.resourceLimits[group],
-        next: 0,
-      };
-      queues.set(group, queue);
-    }
-    queue.indices.push(index);
-  });
+  const scheduler = new StageScheduler(invocations, scheduling);
   let active = 0;
   let completed = Promise.withResolvers<void>();
   let failed = false;
   let stopped = false;
   let failure: { error: unknown } | undefined;
 
-  async function launch(queue: ResourceQueue) {
-    const index = queue.indices[queue.next++];
-    queue.active++;
+  async function launch(scheduled: ScheduledTask) {
+    const { index } = scheduled;
     active++;
     try {
       const result = await runTask(invocations[index], registry, lifecycle);
@@ -343,7 +298,7 @@ async function runStage(
       failure ??= { error };
       stopped = true;
     } finally {
-      queue.active--;
+      scheduler.complete(scheduled);
       active--;
       completed.resolve();
     }
@@ -351,20 +306,11 @@ async function runStage(
 
   while (true) {
     while (!stopped && !signal.aborted && active < scheduling.maxConcurrency) {
-      let eligible: ResourceQueue | undefined;
-      for (const queue of queues.values()) {
-        if (
-          queue.active < queue.limit &&
-          queue.next < queue.indices.length &&
-          (eligible === undefined || queue.indices[queue.next] < eligible.indices[eligible.next])
-        ) {
-          eligible = queue;
-        }
-      }
-      if (eligible === undefined) {
+      const scheduled = scheduler.take();
+      if (scheduled === undefined) {
         break;
       }
-      void launch(eligible);
+      void launch(scheduled);
     }
     if (active === 0) {
       break;

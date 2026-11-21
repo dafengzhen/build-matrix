@@ -5,7 +5,7 @@ import type { ExecuteOptions } from './execute.js';
 import type { RunResult, WatchAdapter } from './types.js';
 
 import { pollingWatchAdapter } from '../adapters/watch.js';
-import { asArray, asNonemptyString, invalid } from '../core/validation.js';
+import { asArray, asPath, invalid } from '../core/validation.js';
 import { defaultCacheDirectory } from './cache.js';
 import { runPlan } from './execute.js';
 import { createDefaultRegistry } from './registry.js';
@@ -21,18 +21,21 @@ export interface WatchOptions extends ExecuteOptions {
 
 /** Execute a plan for each run requested by the watch adapter. */
 export async function watchPlan(plan: Plan, options: WatchOptions): Promise<void> {
-  const cwd =
-    options.cwd === undefined ? process.cwd() : resolve(asNonemptyString(options.cwd, 'cwd'));
+  const cwd = options.cwd === undefined ? process.cwd() : resolve(asPath(options.cwd, 'cwd'));
   const paths = pathsFrom(cwd, options.paths, 'watch.paths');
   if (paths.length === 0) {
     invalid('watch.paths', 'expected at least one path');
   }
   const ignored = pathsFrom(cwd, options.ignore ?? [], 'watch.ignore');
   if (options.cache !== false) {
-    ignored.push(resolve(cwd, options.cache?.directory ?? defaultCacheDirectory));
+    ignored.push(
+      resolve(cwd, asPath(options.cache?.directory ?? defaultCacheDirectory, 'cache.directory')),
+    );
   }
   const manifest =
-    options.manifestPath === undefined ? undefined : resolve(cwd, options.manifestPath);
+    options.manifestPath === undefined
+      ? undefined
+      : resolve(cwd, asPath(options.manifestPath, 'manifestPath'));
   if (manifest !== undefined) {
     ignored.push(manifest);
   }
@@ -80,14 +83,9 @@ function isWithin(parent: string, path: string): boolean {
 function pathsFrom(cwd: string, values: readonly string[], field: string): string[] {
   return [
     ...new Set(
-      asArray(values, field).map((value, index) => {
-        const label = `${field}[${index}]`;
-        const path = asNonemptyString(value, label);
-        if (path.includes('\0')) {
-          invalid(label, 'path contains a NUL character');
-        }
-        return resolve(cwd, path);
-      }),
+      asArray(values, field).map((value, index) =>
+        resolve(cwd, asPath(value, `${field}[${index}]`)),
+      ),
     ),
   ];
 }

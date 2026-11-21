@@ -12,9 +12,14 @@ import {
 
 const defaultMaxVariants = 1000;
 const dimensionName = /^[a-zA-Z_][\w-]*$/;
+type ExcludeRule = [string, DimensionValue][];
 
 /** Expand in dimension declaration order, applying excludes before explicit includes. */
 export function expandMatrix(input: unknown): readonly Variant[] {
+  return resolveMatrix(input).variants;
+}
+
+export function resolveMatrix(input: unknown) {
   const matrix = asRecord(input, 'matrix');
   checkKeys(matrix, 'matrix', ['dimensions', 'exclude', 'include', 'maxVariants', 'idTemplate']);
   const declared = asRecord(matrix.dimensions, 'matrix.dimensions');
@@ -50,44 +55,18 @@ export function expandMatrix(input: unknown): readonly Variant[] {
       'matrix.idTemplate',
     );
   }
-  const excludes = readRules(matrix.exclude, 'exclude', dimensions);
+  const excludes = readRules(matrix.exclude, 'exclude', dimensions).map(Object.entries);
   const includes = readRules(matrix.include, 'include', dimensions);
-
-  const excludeAt = new Map<number, [string, DimensionValue][][]>();
-  const positions = new Map(names.map((name, index) => [name, index + 1]));
-  for (const rule of excludes) {
-    const entries = Object.entries(rule);
-    // Remove excluded values before walking the product, even for the last dimension.
-    if (entries.length === 1) {
-      const [[name, value]] = entries;
-      dimensions.get(name)!.delete(value);
-      continue;
-    }
-    if (entries.some(([name, value]) => !dimensions.get(name)!.has(value))) {
-      continue;
-    }
-    // A rule can prune a branch as soon as its last referenced dimension is assigned.
-    const depth = entries.reduce((last, [name]) => Math.max(last, positions.get(name)!), 0);
-    let rules = excludeAt.get(depth);
-    if (rules === undefined) {
-      rules = [];
-      excludeAt.set(depth, rules);
-    }
-    rules.push(entries);
-  }
-
   const variants: Variant[] = [];
-  // The product is already unique. Only explicit includes can repeat a combination.
-  const combinations = includes.length === 0 ? undefined : new Set<string>();
+  const pendingIncludes = new Map<string, DimensionValues>();
+  const combinationKey = (values: DimensionValues) =>
+    JSON.stringify(names.map((name) => values[name]));
+  for (const included of includes) {
+    const values = Object.fromEntries(names.map((name) => [name, included[name]]));
+    pendingIncludes.set(combinationKey(values), values);
+  }
   const ids = template === undefined ? undefined : new Set<string>();
   function add(values: DimensionValues) {
-    if (combinations !== undefined) {
-      const combination = JSON.stringify(names.map((name) => values[name]));
-      if (combinations.has(combination)) {
-        return;
-      }
-      combinations.add(combination);
-    }
     if (variants.length === limit) {
       invalid('matrix.maxVariants', `matrix exceeds the limit of ${limit} variants`);
     }
@@ -106,14 +85,31 @@ export function expandMatrix(input: unknown): readonly Variant[] {
     variants.push(Object.freeze({ id, values: Object.freeze(values) }));
   }
 
-  const axes = [...dimensions.values()].map((values) => [...values]);
-  if (!excludeAt.has(0) && axes.every((values) => values.length > 0)) {
+  if (!excludes.some((rule) => rule.length === 0)) {
+    const excludeAt = indexExcludes(excludes, dimensions);
+    const axes = [...dimensions.values()].map((values) => [...values]);
+    if (axes.every((values) => values.length > 0)) {
+      expandProduct(axes, excludeAt);
+    }
+  }
+  for (const values of pendingIncludes.values()) {
+    add(values);
+  }
+  return { names, variants: Object.freeze(variants) };
+
+  function expandProduct(
+    axes: readonly DimensionValue[][],
+    excludeAt: ReadonlyMap<DimensionValue, ExcludeRule[]>[],
+  ) {
     const partial = Object.fromEntries(names.map((name, index) => [name, axes[index][0]]));
     // A cursor per axis lets each parent resume after visiting or pruning a branch.
     const nextIndex = axes.map(() => 0);
     let depth = 0;
     while (depth >= 0) {
       if (depth === axes.length) {
+        if (pendingIncludes.size > 0) {
+          pendingIncludes.delete(combinationKey(partial));
+        }
         add({ ...partial });
         depth--;
         continue;
@@ -126,17 +122,14 @@ export function expandMatrix(input: unknown): readonly Variant[] {
         continue;
       }
       nextIndex[depth]++;
-      partial[names[depth]] = axis[index];
-      const rules = excludeAt.get(depth + 1);
+      const value = axis[index];
+      partial[names[depth]] = value;
+      const rules = excludeAt[depth]?.get(value);
       if (!rules?.some((rule) => rule.every(([name, value]) => partial[name] === value))) {
         depth++;
       }
     }
   }
-  for (const included of includes) {
-    add(Object.fromEntries(names.map((name) => [name, included[name]])));
-  }
-  return Object.freeze(variants);
 }
 
 function asDimensionValue(value: unknown, path: string): DimensionValue {
@@ -167,6 +160,48 @@ function defaultId(names: readonly string[], values: DimensionValues): string {
       return `${key}=${encoded}`;
     })
     .join(',');
+}
+
+function indexExcludes(
+  excludes: readonly ExcludeRule[],
+  dimensions: ReadonlyMap<string, Set<DimensionValue>>,
+) {
+  if (excludes.length === 0) {
+    return [];
+  }
+  // Apply single-axis rules first so compound rules can skip eliminated values.
+  for (const rule of excludes) {
+    if (rule.length === 1) {
+      const [[name, value]] = rule;
+      dimensions.get(name)!.delete(value);
+    }
+  }
+  const positions = new Map([...dimensions.keys()].map((name, index) => [name, index]));
+  const byDepth: Map<DimensionValue, ExcludeRule[]>[] = [];
+  for (const rule of excludes) {
+    if (rule.length < 2 || rule.some(([name, value]) => !dimensions.get(name)!.has(value))) {
+      continue;
+    }
+    // Check a rule only when its last dimension receives the required value.
+    let depth = -1;
+    let anchor = 0;
+    for (const [index, [name]] of rule.entries()) {
+      const position = positions.get(name)!;
+      if (position > depth) {
+        anchor = index;
+        depth = position;
+      }
+    }
+    const [, value] = rule[anchor];
+    const byValue = (byDepth[depth] ??= new Map());
+    const rules = byValue.get(value);
+    if (rules === undefined) {
+      byValue.set(value, [rule]);
+    } else {
+      rules.push(rule);
+    }
+  }
+  return byDepth;
 }
 
 function readRules(

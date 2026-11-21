@@ -3,7 +3,7 @@ import { isAbsolute, parse, relative, resolve, sep } from 'node:path';
 
 import type { Adapter } from '../executor/types.js';
 
-import { asNonemptyString, asRecord, checkKeys, invalid } from '../core/validation.js';
+import { asPath, asRecord, checkKeys, invalid } from '../core/validation.js';
 
 export type CleanOptions = {
   readonly path: string;
@@ -14,7 +14,7 @@ export function createCleanAdapter(): Adapter<CleanOptions> {
     async run(context, input) {
       const options = asRecord(input, 'clean options');
       checkKeys(options, 'clean options', ['path']);
-      const path = asNonemptyString(options.path, 'clean options.path');
+      const path = asPath(options.path, 'clean options.path');
       if (parse(path).root !== '') {
         invalid('clean options.path', 'expected a relative path');
       }

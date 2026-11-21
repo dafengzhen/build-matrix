@@ -26,6 +26,14 @@ export function asNonemptyString(value: unknown, path: string): string {
   return value;
 }
 
+export function asPath(value: unknown, label: string): string {
+  const path = asNonemptyString(value, label);
+  if (path.includes('\0')) {
+    invalid(label, 'path contains a NUL character');
+  }
+  return path;
+}
+
 export function asPositiveInteger(value: unknown, path: string): number {
   if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 1) {
     invalid(path, 'expected a positive safe integer');

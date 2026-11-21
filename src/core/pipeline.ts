@@ -6,7 +6,7 @@ import type {
   TaskCacheDefinition,
 } from './types.js';
 
-import { expandMatrix } from './matrix.js';
+import { resolveMatrix } from './matrix.js';
 import { renderOptions, renderTemplate } from './template.js';
 import {
   asArray,
@@ -23,11 +23,8 @@ import {
 export function createPlan(input: unknown): Plan {
   const config = asRecord(input, 'config');
   checkKeys(config, 'config', ['matrix', 'pipeline']);
-  const variants = expandMatrix(config.matrix);
-  const matrix = asRecord(config.matrix, 'matrix');
-  const dimensions = Object.fromEntries(
-    Object.keys(asRecord(matrix.dimensions, 'matrix.dimensions')).map((name) => [name, '']),
-  );
+  const { names, variants } = resolveMatrix(config.matrix);
+  const dimensions = Object.fromEntries(names.map((name) => [name, '']));
   const pipeline = asRecord(config.pipeline, 'pipeline');
   checkKeys(pipeline, 'pipeline', ['stages', 'resourceLimits']);
   const resourceLimits =

@@ -10,6 +10,7 @@ import type { Adapter, TaskContext } from '../executor/types.js';
 import {
   asArray,
   asNonemptyString,
+  asPath,
   asRecord,
   checkKeys,
   copyJson,
@@ -69,7 +70,7 @@ export function createViteAdapter(): Adapter<undefined | ViteOptions> {
           const option =
             key === 'mode'
               ? asNonemptyString(value, 'vite options.mode')
-              : resolve(cwd, readPath(value, `vite options.${key}`));
+              : resolve(cwd, asPath(value, `vite options.${key}`));
           return [key, option];
         }),
       );
@@ -197,17 +198,9 @@ function readOutputs(value: unknown): readonly ViteOutput[] {
         ? asNonemptyString(environment, `${field}.environment`)
         : undefined,
       kind,
-      path: readPath(path, `${field}.path`),
+      path: asPath(path, `${field}.path`),
     };
   });
-}
-
-function readPath(value: unknown, label: string): string {
-  const path = asNonemptyString(value, label);
-  if (path.includes('\0')) {
-    invalid(label, 'path contains a NUL character');
-  }
-  return path;
 }
 
 function resolveVite(root: string, cwd: string): string {

@@ -10,12 +10,12 @@ export interface RunFilter {
 export function selectInvocations(plan: Plan, filter?: RunFilter) {
   const variants = selectedIds(
     filter?.variantIds,
-    plan.variants.map((variant) => variant.id),
+    () => plan.variants.map((variant) => variant.id),
     'filter.variantIds',
   );
   const tasks = selectedIds(
     filter?.taskIds,
-    plan.stages.flatMap((stage) => stage.tasks.map((task) => task.id)),
+    () => plan.stages.flatMap((stage) => stage.tasks.map((task) => task.id)),
     'filter.taskIds',
   );
   return (taskId: string, variantId?: string) =>
@@ -25,13 +25,13 @@ export function selectInvocations(plan: Plan, filter?: RunFilter) {
 
 function selectedIds(
   requested: readonly string[] | undefined,
-  known: Iterable<string>,
+  known: () => Iterable<string>,
   path: string,
 ) {
   if (requested === undefined) {
     return undefined;
   }
-  const available = new Set(known);
+  const available = new Set(known());
   const selected = new Set<string>();
   for (const value of asArray(requested, path)) {
     const id = asNonemptyString(value, path);

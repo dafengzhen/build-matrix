@@ -103,6 +103,53 @@ it('resource groups share global slots without blocking runnable tasks', async (
   ).rejects.toThrow(/missing limit for resource group "unknown"/);
 });
 
+it('resumes a full resource group in declaration order as its slots become available', async () => {
+  const order: string[] = [];
+  const tasks = [
+    task('a1', 'a'),
+    task('a2', 'a'),
+    task('a3', 'a'),
+    task('b1', 'b'),
+    task('b2', 'b'),
+  ];
+  const signals = new Map(
+    tasks.map(({ id }) => [
+      id,
+      { finish: Promise.withResolvers<void>(), started: Promise.withResolvers<void>() },
+    ]),
+  );
+  const registry = registryFor(async ({ taskId }) => {
+    const gate = signals.get(taskId)!;
+    order.push(taskId);
+    gate.started.resolve();
+    await gate.finish.promise;
+    return {};
+  });
+  const run = executePlan(plan([{ id: 'build', tasks }], { a: 2, b: 2 }), {
+    maxConcurrency: 3,
+    registry,
+  });
+
+  try {
+    await signals.get('b1')!.started.promise;
+    expect(order).toStrictEqual(['a1', 'a2', 'b1']);
+    signals.get('a1')!.finish.resolve();
+    await signals.get('a3')!.started.promise;
+    expect(order).toStrictEqual(['a1', 'a2', 'b1', 'a3']);
+    signals.get('a2')!.finish.resolve();
+    await signals.get('b2')!.started.promise;
+    expect(order).toStrictEqual(['a1', 'a2', 'b1', 'a3', 'b2']);
+  } finally {
+    for (const { finish } of signals.values()) {
+      finish.resolve();
+    }
+  }
+  const result = await run;
+  expect(result.stages[0].tasks.map(({ taskId }) => taskId)).toStrictEqual(
+    tasks.map(({ id }) => id),
+  );
+});
+
 it('fail-fast stops queued work while the failed task finish hook is pending', async () => {
   const bothStarted = Promise.withResolvers<void>();
   const fail = Promise.withResolvers<void>();
