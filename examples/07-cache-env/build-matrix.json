@@ -1,0 +1,31 @@
+{
+  "matrix": {
+    "dimensions": {
+      "locale": ["en", "zh"]
+    },
+    "idTemplate": "{locale}"
+  },
+  "pipeline": {
+    "stages": [
+      {
+        "id": "build",
+        "tasks": [
+          {
+            "id": "banner",
+            "adapter": "shell",
+            "options": {
+              "command": "node",
+              "args": ["build.ts", "{locale}"]
+            },
+            "cache": {
+              "version": "banner@1",
+              "inputs": ["build.ts", "src/{locale}.txt"],
+              "outputs": ["dist/{locale}.txt"],
+              "env": ["BUILD_MATRIX_EXAMPLE_LABEL"]
+            }
+          }
+        ]
+      }
+    ]
+  }
+}

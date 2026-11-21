@@ -1,0 +1,33 @@
+{
+  "matrix": {
+    "dimensions": {}
+  },
+  "pipeline": {
+    "stages": [
+      {
+        "id": "build",
+        "tasks": [
+          {
+            "id": "bundle",
+            "adapter": "vite",
+            "options": {
+              "environments": ["client", "ssr"],
+              "outputs": [
+                {
+                  "environment": "client",
+                  "kind": "file",
+                  "path": "dist/client/index.html"
+                },
+                {
+                  "environment": "ssr",
+                  "kind": "file",
+                  "path": "dist/server/render.js"
+                }
+              ]
+            }
+          }
+        ]
+      }
+    ]
+  }
+}

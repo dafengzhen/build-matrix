@@ -1,0 +1,40 @@
+{
+  "matrix": {
+    "dimensions": {
+      "target": ["legacy", "modern"]
+    },
+    "idTemplate": "{target}"
+  },
+  "pipeline": {
+    "stages": [
+      {
+        "id": "verify",
+        "failurePolicy": "continue",
+        "tasks": [
+          {
+            "id": "check",
+            "adapter": "shell",
+            "options": {
+              "command": "node",
+              "args": ["check.ts", "{target}"]
+            }
+          }
+        ]
+      },
+      {
+        "id": "summary",
+        "tasks": [
+          {
+            "id": "ready",
+            "adapter": "shell",
+            "scope": "global",
+            "options": {
+              "command": "node",
+              "args": ["-e", "console.log('All selected targets passed')"]
+            }
+          }
+        ]
+      }
+    ]
+  }
+}
