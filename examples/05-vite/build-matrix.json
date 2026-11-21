@@ -15,10 +15,11 @@
             "adapter": "vite",
             "options": {
               "mode": "{mode}",
-              "outDir": "dist/{mode}"
+              "outDir": "dist/{mode}",
+              "outputs": [{ "environment": "client", "kind": "directory", "path": "dist/{mode}" }]
             },
             "cache": {
-              "version": "vite-adapter@1;vite@8.3.8",
+              "version": "vite-adapter@2;vite@8.3.8",
               "inputs": ["index.html", "src", "tsconfig.json", "vite.config.ts", "package.json"],
               "outputs": ["dist/{mode}"]
             }

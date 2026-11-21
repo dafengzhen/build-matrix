@@ -251,7 +251,11 @@ function listInvocations(
         active && task.cache !== undefined
           ? prepareCache(task.cache, cacheDirectory, context)
           : undefined;
-      return { cache, context: Object.freeze(context), selected: active, task };
+      const adapterContext =
+        cache === undefined
+          ? context
+          : { ...context, cacheOutputs: Object.freeze([...cache.outputs]) };
+      return { cache, context: Object.freeze(adapterContext), selected: active, task };
     });
   });
   if (cacheDirectory !== undefined) {

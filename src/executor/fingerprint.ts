@@ -20,7 +20,7 @@ export async function fingerprintPaths(
   requiredPaths?: readonly string[],
 ): Promise<PathFingerprint | undefined> {
   const hash = createHash('sha256');
-  const pending = requiredPaths === undefined ? undefined : new Set(requiredPaths);
+  const pending = requiredPaths === undefined ? undefined : new Set(requiredPaths.map(pathKey));
   const matchedPaths = new Map<string, PathKind>();
 
   async function visit(absolute: string, local: string, before: BigIntStats): Promise<boolean> {
@@ -46,7 +46,7 @@ export async function fingerprintPaths(
     } else {
       return false;
     }
-    if (pending?.delete(local)) {
+    if (pending?.delete(pathKey(local))) {
       matchedPaths.set(local, kind);
     }
     return unchanged(before, await lstat(absolute, { bigint: true }));
@@ -90,6 +90,10 @@ export async function statWorkspacePath(
     signal.throwIfAborted();
   }
   return lstat(join(root, path), { bigint: true });
+}
+
+function pathKey(path: string): string {
+  return process.platform === 'win32' ? path.toLowerCase() : path;
 }
 
 function unchanged(before: BigIntStats, after: BigIntStats): boolean {

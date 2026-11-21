@@ -58,13 +58,31 @@ CLI 默认读取当前目录中的 `build-matrix.json`。可将另一份配置�
 
 ## 适配器
 
-| 适配器  | 选项与行为                                                                                                                                                                                   |
-| ------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `shell` | `command` 为可执行文件，`args` 为可选字符串数组。参数按原样传递。使用管道或重定向时需显式调用 shell。取消时终止直接启动的子进程。                                                            |
-| `clean` | `path` 为工作目录内的相对文件或目录。路径缺失时成功返回。工作目录本身、目录外路径和经过符号链接或 junction 的路径会报错。                                                                    |
-| `vite`  | 可选 `root`、`configFile`、`mode`、`outDir` 和 `viteConfig`。每次调用构建一次，若顶层 `outDir` 指定的目录在构建后存在则报告该产物。使用此适配器的项目需要安装 Vite 8.3.8 或兼容的 8.x 版本。 |
+| 适配器  | 选项与行为                                                                                                                                                                            |
+| ------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `shell` | `command` 为可执行文件，`args` 为可选字符串数组。参数按原样传递。使用管道或重定向时需显式调用 shell。取消时终止直接启动的子进程。                                                     |
+| `clean` | `path` 为工作目录内的相对文件或目录。路径缺失时成功返回。工作目录本身、目录外路径和经过符号链接或 junction 的路径会报错。                                                             |
+| `vite`  | 可选 `root`、`configFile`、`mode`、`outDir`、`viteConfig`、`environments` 和 `outputs`。每次调用执行一次构建并报告磁盘产物。使用此适配器的项目需要安装 Vite 8.3.8 或兼容的 8.x 版本。 |
 
 在 `options.viteConfig` 中以 JSON 对象传入 Vite 内联配置，例如 `{ "build": { "sourcemap": true } }`。Vite 会按自身规则将它与项目配置文件合并。显式设置的顶层 `root`、`configFile`、`mode` 和 `outDir` 优先，顶层选项中的路径相对于任务工作目录。`viteConfig` 内的路径遵循 Vite 规则，例如相对的 `viteConfig.build.outDir` 以 Vite 项目根目录为基准。
+
+适配器优先从顶层 `root` 或 `viteConfig.root` 解析 Vite，其次从任务工作目录解析，最后从 Build Matrix 自身解析。如果 Vite 安装在 Monorepo 的子包中，请设置其中一个根目录选项。依赖解析发生在 Vite 加载项目配置文件之前。
+
+`environments` 支持单个名称、名称数组和 `"all"`。指定名称时按列表顺序构建，每个 Environment 执行一次并触发自身的 Vite 构建钩子。`"all"` 首先通过 Vite 的应用构建入口执行项目的应用级钩子和构建编排，然后补建其余 Environment。省略此选项时沿用 Vite 默认的 Builder 选择规则。[Vite Environment API](https://vite.dev/guide/api-environment-frameworks#environments-during-build)
+
+```json
+{
+  "environments": ["client", "worker"],
+  "outputs": [
+    { "environment": "client", "kind": "directory", "path": "dist/client" },
+    { "environment": "worker", "kind": "file", "path": "dist/worker/index.js" }
+  ]
+}
+```
+
+`outputs` 声明构建后需要检查和报告的产物。路径可以是相对于任务工作目录的路径，也可以是绝对路径。省略 `kind` 时根据磁盘上的产物判断类型。带有 `environment` 的条目在对应 Environment 参与构建时生效，其余条目适用于整个任务。省略 `outputs` 时，适配器根据 Vite 实际写入的路径报告文件或目录，并支持多个输出目录。只在内存中生成的内容不会出现在磁盘产物列表中。
+
+任务同时声明 `cache.outputs` 时，每项适用的 `options.outputs` 都必须在缓存声明中列出，或位于声明的目录内。产物缺失、类型不符或未被缓存声明覆盖时，Vite 任务会失败。
 
 ## 过滤和报告
 

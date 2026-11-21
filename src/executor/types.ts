@@ -23,6 +23,7 @@ export interface AdapterOutput {
 }
 
 export interface Artifact {
+  readonly environment?: string;
   readonly kind?: string;
   /** Relative to the task working directory, or an absolute path. */
   readonly path: string;
@@ -80,6 +81,8 @@ export interface StageResult {
 export type StageStatus = Exclude<TaskStatus, 'cached'>;
 
 export interface TaskContext {
+  /** Rendered cache output paths relative to cwd, when the task declares a cache. */
+  readonly cacheOutputs?: readonly string[];
   readonly cwd: string;
   readonly logger: Logger;
   readonly runId: string;

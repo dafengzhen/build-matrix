@@ -38,6 +38,14 @@ interface PreparedCache extends TaskCacheDefinition {
   readonly label: string;
 }
 
+export function coversOutputPath(outputs: readonly string[], path: string): boolean {
+  const local = comparable(path);
+  return outputs.some((output) => {
+    const boundary = comparable(output);
+    return local === boundary || local.startsWith(boundary + sep);
+  });
+}
+
 export function prepareCache(
   definition: TaskCacheDefinition,
   directory: string | undefined,
@@ -213,6 +221,9 @@ function fingerprintOutputs(
   result: AdapterOutput,
 ) {
   const reported = result.outputs?.map(({ path }) => relative(cwd, resolve(cwd, path)));
+  if (reported?.some((path) => !coversOutputPath(cache.outputs, path))) {
+    return undefined;
+  }
   return fingerprintPaths(root, cache.outputs, signal, reported ?? cache.outputs);
 }
 

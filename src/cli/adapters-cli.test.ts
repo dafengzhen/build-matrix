@@ -1,4 +1,4 @@
-import type { MatrixDefinition, StageDefinition } from '@dafengzhen/build-matrix';
+import type { JsonObject, MatrixDefinition, StageDefinition } from '@dafengzhen/build-matrix';
 import type { TestContext } from 'vitest';
 
 import { createPlan } from '@dafengzhen/build-matrix';
@@ -145,6 +145,198 @@ it(
     expect(observed).toStrictEqual(['vite-build', 'cached']);
   },
 );
+
+it(
+  'builds Vite environments individually or as an app and reports written outputs',
+  { timeout: 30_000 },
+  async (t) => {
+    const cwd = await workspace(t);
+    const root = join(cwd, 'site');
+    await mkdir(root);
+    await writeFile(join(root, 'entry.js'), 'export const value = 1;');
+    await writeFile(
+      join(root, 'vite.config.mjs'),
+      `
+    import { appendFileSync } from 'node:fs';
+    import { fileURLToPath } from 'node:url';
+    const entry = fileURLToPath(new URL('./entry.js', import.meta.url));
+    const record = (name) => appendFileSync('events.txt', name + '\\n');
+    export default {
+      builder: {
+        async buildApp(builder) {
+          record('app');
+          await builder.build(builder.environments.worker);
+        },
+      },
+      environments: {
+        client: {
+          build: { rolldownOptions: { input: entry, output: [
+            { dir: 'bundles/client-es' },
+            { dir: 'bundles/client-cjs', format: 'cjs' },
+          ] } },
+        },
+        worker: { build: { outDir: 'worker', rolldownOptions: { input: entry, output: { entryFileNames: 'bundle.js' } } } },
+        admin: { build: { outDir: 'admin', rolldownOptions: { input: entry } } },
+      },
+      plugins: [{
+        name: 'test-lifecycle',
+        buildApp: { order: 'pre', handler() { record('pre'); } },
+        closeBundle() { record(this.environment.name); },
+      }, {
+        name: 'test-post',
+        buildApp: { order: 'post', handler() { record('post'); } },
+      }],
+    };
+  `,
+    );
+    const run = async (options: JsonObject) => {
+      const result = await executePlan(
+        makePlan([
+          {
+            id: 'build',
+            tasks: [{ adapter: 'vite', id: 'bundle', options: { root: 'site', ...options } }],
+          },
+        ]),
+        { cwd, signal: t.signal },
+      );
+      assert.strictEqual(result.status, 'success', JSON.stringify(result));
+      return result.stages[0].tasks[0].outputs;
+    };
+
+    expect(
+      await run({
+        environments: 'worker',
+        outputs: [
+          { environment: 'worker', path: 'site/worker/bundle.js' },
+          { environment: 'worker', kind: 'directory', path: 'site/worker' },
+          { environment: 'admin', kind: 'directory', path: 'site/admin' },
+        ],
+      }),
+    ).toStrictEqual([
+      { environment: 'worker', kind: 'file', path: 'site/worker/bundle.js' },
+      { environment: 'worker', kind: 'directory', path: 'site/worker' },
+    ]);
+    expect(await readFile(join(cwd, 'events.txt'), 'utf8')).toBe('worker\n');
+
+    expect(await run({ environments: ['admin', 'client', 'admin'] })).toStrictEqual([
+      { environment: 'admin', kind: 'directory', path: 'site/admin' },
+      { environment: 'client', kind: 'directory', path: 'bundles/client-es' },
+      { environment: 'client', kind: 'directory', path: 'bundles/client-cjs' },
+    ]);
+    expect(await run({ environments: 'all' })).toEqual(
+      expect.arrayContaining([
+        { environment: 'worker', kind: 'directory', path: 'site/worker' },
+        { environment: 'admin', kind: 'directory', path: 'site/admin' },
+        { environment: 'client', kind: 'directory', path: 'bundles/client-es' },
+        { environment: 'client', kind: 'directory', path: 'bundles/client-cjs' },
+      ]),
+    );
+    expect(await readFile(join(cwd, 'events.txt'), 'utf8')).toMatch(
+      /^worker\nadmin\nclient\npre\napp\nworker\npost\nclient\nadmin\n$/,
+    );
+  },
+);
+
+it(
+  'validates Vite output declarations and cache coverage and restores environment metadata',
+  { timeout: 30_000 },
+  async (t) => {
+    const cwd = await workspace(t);
+    await writeFile(join(cwd, 'index.html'), '<p>Vite</p>');
+    const run = async (
+      path: string,
+      kind: 'directory' | 'file',
+      cacheOutput: string,
+      environment = 'client',
+    ) => {
+      const report = join(cwd, 'report.json');
+      const plan = makePlan([
+        {
+          id: 'build',
+          tasks: [
+            {
+              adapter: 'vite',
+              cache: {
+                inputs: ['index.html'],
+                outputs: [cacheOutput],
+                version: 'test-vite-outputs',
+              },
+              id: 'bundle',
+              options: { outputs: [{ environment, kind, path }] },
+            },
+          ],
+        },
+      ]);
+      const result = await executePlan(plan, { cwd, manifestPath: report, signal: t.signal });
+      return {
+        manifest: JSON.parse(await readFile(report, 'utf8')),
+        task: result.stages[0].tasks[0],
+      };
+    };
+
+    expect((await run('dist/missing.txt', 'file', 'dist')).task.error).toMatchObject({
+      code: 'VITE_INVALID_OUTPUT',
+      message: expect.stringContaining('Vite output "dist/missing.txt" for environment "client"'),
+    });
+    expect((await run('dist/index.html', 'directory', 'dist')).task.error).toMatchObject({
+      code: 'VITE_INVALID_OUTPUT',
+      message: expect.stringContaining('expected a directory, found file'),
+    });
+    expect((await run('dist/index.html', 'file', 'other')).task.error).toMatchObject({
+      code: 'VITE_CACHE_OUTPUT_MISMATCH',
+      message: expect.stringContaining('cache.outputs'),
+    });
+    expect((await run('dist/index.html', 'file', 'dist', 'missing')).task.error).toMatchObject({
+      code: 'VITE_UNKNOWN_ENVIRONMENT',
+      message: expect.stringContaining('Available: client'),
+    });
+    expect((await run('dist/index.html', 'file', 'dist')).task.status).toBe('success');
+    const { manifest, task } = await run('dist/index.html', 'file', 'dist');
+    expect(task.status).toBe('cached');
+    expect(task.outputs).toStrictEqual([
+      { environment: 'client', kind: 'file', path: 'dist/index.html' },
+    ]);
+    expect(manifest.stages[0].tasks[0].outputs).toStrictEqual(task.outputs);
+  },
+);
+
+it('resolves Vite from the effective inline or top-level root before the task directory', async (t) => {
+  const cwd = await workspace(t);
+  const project = join(cwd, 'packages', 'project');
+  const empty = await workspace(t);
+  for (const [directory, origin] of [
+    [cwd, 'task'],
+    [project, 'project'],
+  ]) {
+    const vitePackage = join(directory, 'node_modules', 'vite');
+    await mkdir(vitePackage, { recursive: true });
+    await writeFile(
+      join(vitePackage, 'package.json'),
+      JSON.stringify({ main: './index.mjs', name: 'vite' }),
+    );
+    await writeFile(
+      join(vitePackage, 'index.mjs'),
+      `
+      import { writeFileSync } from 'node:fs';
+      export const mergeConfig = (inline, overrides) => ({ ...inline, ...overrides });
+      export const createBuilder = async () => ({
+        buildApp() { writeFileSync('origin.txt', ${JSON.stringify(origin)}); },
+        config: { build: {}, environments: {} },
+        environments: {},
+      });
+    `,
+    );
+  }
+  const run = async (options: JsonObject) => {
+    const plan = makePlan([{ id: 'build', tasks: [{ adapter: 'vite', id: 'bundle', options }] }]);
+    const result = await executePlan(plan, { cwd, signal: t.signal });
+    assert.strictEqual(result.status, 'success', JSON.stringify(result));
+    return readFile(join(cwd, 'origin.txt'), 'utf8');
+  };
+  expect(await run({ viteConfig: { root: 'packages/project' } })).toBe('project');
+  expect(await run({ root: 'packages/project', viteConfig: { root: '.' } })).toBe('project');
+  expect(await run({ root: empty.replace(/\{([a-zA-Z_][\w-]*)\}/g, '{{$1}}') })).toBe('task');
+});
 
 it('clean rejects cwd and external targets, and accepts a missing path', async (t) => {
   const cwd = await workspace(t);

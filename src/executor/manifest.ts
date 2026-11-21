@@ -191,9 +191,11 @@ function manifestTask(task: TaskResult): TaskResult {
     ...(outputs === undefined
       ? {}
       : {
-          outputs: outputs.map(({ kind, path }) =>
-            kind === undefined ? { path } : { kind, path },
-          ),
+          outputs: outputs.map(({ environment, kind, path }) => ({
+            ...(environment === undefined ? {} : { environment }),
+            ...(kind === undefined ? {} : { kind }),
+            path,
+          })),
         }),
     ...(metadata === undefined ? {} : { metadata }),
     ...(error === undefined ? {} : { error: manifestError(error) }),

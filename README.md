@@ -58,13 +58,31 @@ The CLI reads `build-matrix.json` in the current directory by default. Pass a pa
 
 ## Adapters
 
-| Adapter | Options and behavior                                                                                                                                                                                                                                                |
-| ------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `shell` | `command` is an executable and `args` is an optional array of strings. Arguments are passed directly. To use pipes or redirection, invoke a shell explicitly. Cancellation stops the direct child process.                                                          |
-| `clean` | `path` is a relative file or directory inside the task working directory. A missing path succeeds. The working directory itself, external paths, and paths through symbolic links or junctions are rejected.                                                        |
-| `vite`  | Optional `root`, `configFile`, `mode`, `outDir`, and `viteConfig`. Each invocation runs one build and reports the directory specified by top-level `outDir` if it exists afterwards. Install Vite 8.3.8 or a compatible 8.x release in projects using this adapter. |
+| Adapter | Options and behavior                                                                                                                                                                                                                             |
+| ------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `shell` | `command` is an executable and `args` is an optional array of strings. Arguments are passed directly. To use pipes or redirection, invoke a shell explicitly. Cancellation stops the direct child process.                                       |
+| `clean` | `path` is a relative file or directory inside the task working directory. A missing path succeeds. The working directory itself, external paths, and paths through symbolic links or junctions are rejected.                                     |
+| `vite`  | Optional `root`, `configFile`, `mode`, `outDir`, `viteConfig`, `environments`, and `outputs`. Each invocation runs a one-shot build and reports its disk outputs. Install Vite 8.3.8 or a compatible 8.x release in projects using this adapter. |
 
 Set `options.viteConfig` to a JSON object containing inline Vite settings, such as `{ "build": { "sourcemap": true } }`. Vite merges it with the project config file using its usual rules. Explicit top-level `root`, `configFile`, `mode`, and `outDir` take precedence. Paths in those top-level options are relative to the task working directory. Paths inside `viteConfig` follow Vite's rules, so a relative `viteConfig.build.outDir` is relative to the Vite project root.
+
+The adapter resolves Vite from the top-level `root` or `viteConfig.root` first, then from the task working directory, then from Build Matrix. Set one of those root options if Vite lives in a separate package. Resolution happens before Vite loads its project config file.
+
+Use `environments` with one name, a list of names, or `"all"`. Named environments build once each in the order listed and run their own Vite build hooks. `"all"` runs Vite's app builder with the project's app-level hooks and orchestration, then builds any remaining environments. Omitting the option keeps Vite's default builder selection. [Vite Environment API](https://vite.dev/guide/api-environment-frameworks#environments-during-build)
+
+```json
+{
+  "environments": ["client", "worker"],
+  "outputs": [
+    { "environment": "client", "kind": "directory", "path": "dist/client" },
+    { "environment": "worker", "kind": "file", "path": "dist/worker/index.js" }
+  ]
+}
+```
+
+`outputs` declares the paths to report and verify after the build. Paths are relative to the task working directory or absolute. Omit `kind` to infer it from disk. Entries with an `environment` apply when that environment builds. Entries without one apply to the whole task. With no `outputs` declaration, the adapter reports the files or directories Vite writes to, including multiple output directories. An in-memory build has no inferred disk outputs.
+
+When the task also declares `cache.outputs`, each applicable `options.outputs` path must be listed there or covered by a declared directory. A missing path, the wrong kind, or a cache coverage mismatch fails the Vite task.
 
 ## Filters and reports
 

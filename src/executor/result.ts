@@ -40,7 +40,15 @@ export function normalizeOutput(output: unknown): AdapterOutput {
                 artifact.kind === undefined
                   ? undefined
                   : asNonemptyString(artifact.kind, `${label}.kind`);
-              return kind === undefined ? { path } : { kind, path };
+              const environment =
+                artifact.environment === undefined
+                  ? undefined
+                  : asNonemptyString(artifact.environment, `${label}.environment`);
+              return {
+                ...(environment === undefined ? {} : { environment }),
+                ...(kind === undefined ? {} : { kind }),
+                path,
+              };
             }),
           }),
       ...(metadata === undefined
