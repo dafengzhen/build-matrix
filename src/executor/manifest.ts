@@ -209,10 +209,12 @@ function manifestTask(task: TaskResult, detailed = false): TaskResult {
     ...(outputs === undefined
       ? {}
       : {
-          outputs: outputs.map(({ environment, kind, path }) => ({
+          outputs: outputs.map(({ environment, kind, path, sha256, sizeBytes }) => ({
             ...(environment === undefined ? {} : { environment }),
             ...(kind === undefined ? {} : { kind }),
             path,
+            ...(sha256 === undefined ? {} : { sha256 }),
+            ...(sizeBytes === undefined ? {} : { sizeBytes }),
           })),
         }),
     ...(metadata === undefined ? {} : { metadata }),

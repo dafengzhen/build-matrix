@@ -59,7 +59,7 @@ export async function watchPlan(plan: Plan, options: WatchOptions): Promise<void
     ignore,
     paths,
     pollIntervalMs: options.pollIntervalMs,
-    async run(changedPaths, watchSignal) {
+    async run(changedPaths, watchSignal, trackInputs) {
       const runSignal = watchSignal === undefined ? signal : AbortSignal.any([signal, watchSignal]);
       if (runSignal.aborted) {
         return;
@@ -68,7 +68,7 @@ export async function watchPlan(plan: Plan, options: WatchOptions): Promise<void
         changedPaths: Object.freeze([...changedPaths]),
         number: ++number,
       });
-      const result = await runPlan(plan, { ...settings, signal: runSignal }, watch);
+      const result = await runPlan(plan, { ...settings, signal: runSignal }, watch, trackInputs);
       await options.onRun?.(result);
     },
     signal,

@@ -45,10 +45,25 @@ export function normalizeOutput(output: unknown): AdapterOutput {
                 artifact.environment === undefined
                   ? undefined
                   : asNonemptyString(artifact.environment, `${label}.environment`);
+              const { sha256, sizeBytes } = artifact;
+              if (
+                sha256 !== undefined &&
+                (typeof sha256 !== 'string' || !/^[\da-f]{64}$/.test(sha256))
+              ) {
+                throw new TypeError(`${label}.sha256 must be a lowercase SHA-256 digest`);
+              }
+              if (
+                sizeBytes !== undefined &&
+                (typeof sizeBytes !== 'number' || !Number.isSafeInteger(sizeBytes) || sizeBytes < 0)
+              ) {
+                throw new TypeError(`${label}.sizeBytes must be a nonnegative safe integer`);
+              }
               return {
                 ...(environment === undefined ? {} : { environment }),
                 ...(kind === undefined ? {} : { kind }),
                 path,
+                ...(sha256 === undefined ? {} : { sha256 }),
+                ...(sizeBytes === undefined ? {} : { sizeBytes }),
               };
             }),
           }),

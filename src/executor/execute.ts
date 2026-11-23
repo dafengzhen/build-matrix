@@ -2,19 +2,14 @@ import { randomUUID } from 'node:crypto';
 import { addAbortListener } from 'node:events';
 import { resolve } from 'node:path';
 
-import type {
-  JsonValue,
-  Plan,
-  PlannedStage,
-  PlannedTask,
-  ResourceLimits,
-  Variant,
-} from '../core/types.js';
+import type { Plan, PlannedStage, PlannedTask, ResourceLimits, Variant } from '../core/types.js';
 import type { CacheOptions } from './cache.js';
 import type { RunFilter } from './filter.js';
 import type { AdapterRegistry } from './registry.js';
 import type { ScheduledTask } from './scheduler.js';
 import type {
+  Adapter,
+  AdapterPreparation,
   LifecycleHooks,
   Logger,
   RunResult,
@@ -75,6 +70,7 @@ export async function runPlan(
   plan: Plan,
   options: ExecuteOptions,
   watch?: WatchRunInfo,
+  trackInputs?: TaskContext['trackInputs'],
 ): Promise<RunResult> {
   const registry = options.registry ?? createDefaultRegistry();
   const concurrency =
@@ -109,7 +105,7 @@ export async function runPlan(
     invocations: listInvocations(
       stage,
       plan.variants,
-      { cwd, logger, runId, signal },
+      { cwd, logger, runId, signal, ...(trackInputs === undefined ? {} : { trackInputs }) },
       selected,
       cacheDirectory,
       registry,
@@ -248,23 +244,6 @@ async function loadAdapter(registry: AdapterRegistry, id: string, signal: AbortS
   }
 }
 
-function mergeOptions(
-  defaults: JsonValue | undefined,
-  options: JsonValue | undefined,
-): JsonValue | undefined {
-  if (
-    typeof defaults === 'object' &&
-    defaults !== null &&
-    !Array.isArray(defaults) &&
-    typeof options === 'object' &&
-    options !== null &&
-    !Array.isArray(options)
-  ) {
-    return { ...defaults, ...options };
-  }
-  return options === undefined ? defaults : options;
-}
-
 async function runStage(
   stage: PlannedStage,
   invocations: readonly Invocation[],
@@ -338,7 +317,8 @@ async function runTask(
   registry: AdapterRegistry,
   lifecycle: Lifecycle,
 ): Promise<TaskResult> {
-  const { cache, context, task } = invocation;
+  const { context, task } = invocation;
+  let { cache } = invocation;
   const { signal, variant } = context;
   const identity = taskIdentity(invocation);
   const startedAt = new Date().toISOString();
@@ -349,11 +329,37 @@ async function runTask(
     finishedAt: new Date().toISOString(),
     startedAt,
   });
-  const merged = mergeOptions(registry.getDefaults(task.adapter), task.options);
+  const merged = registry.mergeTaskOptions(task.adapter, task.options);
   const options = merged === undefined ? undefined : renderOptions(merged, variant?.values ?? {});
   await lifecycle.emit('onTaskStart', { ...identity, startedAt }, identity);
   try {
     signal.throwIfAborted();
+    let adapter: Adapter | undefined;
+    let prepared: AdapterPreparation | undefined;
+    if (
+      registry.prepares(task.adapter) &&
+      (cache?.directory !== undefined || context.trackInputs)
+    ) {
+      try {
+        adapter = await loadAdapter(registry, task.adapter, signal);
+        prepared = await adapter.prepare?.(context, options);
+        if (prepared?.inputs !== undefined) {
+          await context.trackInputs?.(prepared.inputs);
+        }
+      } catch (error) {
+        signal.throwIfAborted();
+        return { ...finish(), error: normalizeError(error), status: 'failed' };
+      }
+      if (cache !== undefined && prepared !== undefined) {
+        const { cacheKey, inputs } = prepared;
+        cache = {
+          ...cache,
+          additionalKey: cacheKey === false ? undefined : cacheKey,
+          directory: cacheKey === false ? undefined : cache.directory,
+          inputFiles: inputs,
+        };
+      }
+    }
     const probe =
       cache === undefined ? undefined : await probeTaskCache(cache, context, task.adapter, options);
     signal.throwIfAborted();
@@ -361,9 +367,11 @@ async function runTask(
     const status = output === undefined ? 'success' : 'cached';
     if (output === undefined) {
       try {
-        const adapter = await loadAdapter(registry, task.adapter, signal);
+        adapter ??= await loadAdapter(registry, task.adapter, signal);
         signal.throwIfAborted();
-        output = normalizeOutput(await adapter.run(context, options));
+        output = normalizeOutput(
+          await (prepared?.run ? prepared.run() : adapter.run(context, options)),
+        );
       } catch (error) {
         signal.throwIfAborted();
         return { ...finish(), error: normalizeError(error), status: 'failed' };

@@ -1,12 +1,18 @@
 import type { JsonObject, JsonValue, ResourceLimits, Variant } from '../core/types.js';
 
 export interface Adapter<Options = unknown> {
+  /** Discover additional inputs before a cache lookup or a watched build. */
+  prepare?(context: TaskContext, options: Options): Promise<AdapterPreparation>;
   run(context: TaskContext, options: Options): Promise<AdapterOutput>;
 }
 
 export interface AdapterDefinition<Options = unknown> {
   readonly defaults?: JsonValue;
   readonly factory: AdapterFactory<Options>;
+  /** Set false when the factory provides defaults to an adapter that merges its own options. */
+  readonly mergeDefaults?: false;
+  /** Load the adapter before probing the cache to call adapter.prepare(). */
+  readonly prepare?: true;
 }
 
 export type AdapterFactory<Options = unknown> = () => Adapter<Options> | Promise<Adapter<Options>>;
@@ -22,11 +28,21 @@ export interface AdapterOutput {
   readonly outputs?: readonly Artifact[];
 }
 
+export interface AdapterPreparation {
+  /** Set false to bypass the task cache, or supply an additional cache key. */
+  readonly cacheKey?: false | string;
+  /** Extra input files. Missing files are also tracked for creation. */
+  readonly inputs?: readonly string[];
+  run?(): Promise<AdapterOutput>;
+}
+
 export interface Artifact {
   readonly environment?: string;
   readonly kind?: string;
   /** Relative to the task working directory, or an absolute path. */
   readonly path: string;
+  readonly sha256?: string;
+  readonly sizeBytes?: number;
 }
 
 export interface HookFailure {
@@ -89,6 +105,8 @@ export interface TaskContext {
   readonly signal: AbortSignal;
   readonly stageId: string;
   readonly taskId: string;
+  /** Register input files as soon as they are known during a watched run. */
+  readonly trackInputs?: (paths: readonly string[]) => Promise<void>;
   readonly variant?: Variant;
 }
 
@@ -131,7 +149,11 @@ export interface WatchContext {
    * Pass an empty list for the initial run and cwd-relative paths for subsequent runs.
    * Await each run before starting another. The optional signal can cancel the active run.
    */
-  run(changedPaths: readonly string[], signal?: AbortSignal): Promise<void>;
+  run(
+    changedPaths: readonly string[],
+    signal?: AbortSignal,
+    trackInputs?: TaskContext['trackInputs'],
+  ): Promise<void>;
   readonly signal: AbortSignal;
 }
 

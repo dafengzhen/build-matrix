@@ -1,6 +1,6 @@
 import type { CleanOptions } from '../adapters/clean.js';
 import type { ShellOptions } from '../adapters/shell.js';
-import type { ViteOptions } from '../adapters/vite.js';
+import type { ViteAdapterOptions, ViteOptions } from '../adapters/vite.js';
 import type { JsonValue } from '../core/types.js';
 import type { Adapter, AdapterDefinition, AdapterFactory, AdapterLoader } from './types.js';
 
@@ -15,6 +15,8 @@ export interface BuiltinAdapterDefaults {
 interface Registration {
   readonly defaults?: JsonValue;
   readonly factory: AdapterFactory;
+  readonly mergeDefaults?: false;
+  readonly prepare?: true;
 }
 
 export class AdapterRegistry {
@@ -54,6 +56,26 @@ export class AdapterRegistry {
     return pending;
   }
 
+  mergeTaskOptions(id: string, options: JsonValue | undefined): JsonValue | undefined {
+    const entry = this.#registrations.get(id);
+    const defaults = entry?.mergeDefaults === false ? undefined : entry?.defaults;
+    if (
+      typeof defaults === 'object' &&
+      defaults !== null &&
+      !Array.isArray(defaults) &&
+      typeof options === 'object' &&
+      options !== null &&
+      !Array.isArray(options)
+    ) {
+      return { ...defaults, ...options };
+    }
+    return options === undefined ? defaults : options;
+  }
+
+  prepares(id: string): boolean {
+    return this.#registrations.get(id)?.prepare === true;
+  }
+
   register<Options = unknown>(
     id: string,
     entry: AdapterDefinition<Options> | AdapterLoader<Options>,
@@ -62,23 +84,38 @@ export class AdapterRegistry {
     const path = `adapter "${id}"`;
     const definition: Record<string, unknown> =
       typeof entry === 'function' ? { factory: factoryFromLoader(entry) } : asRecord(entry, path);
-    checkKeys(definition, path, ['defaults', 'factory']);
-    const { defaults, factory } = definition;
+    checkKeys(definition, path, ['defaults', 'factory', 'mergeDefaults', 'prepare']);
+    const { defaults, factory, mergeDefaults, prepare } = definition;
     if (typeof factory !== 'function') {
       invalid(`${path}.factory`, 'expected a factory function');
     }
     if (this.has(id)) {
       invalid(path, 'already registered');
     }
+    if (prepare !== undefined && prepare !== true) {
+      invalid(`${path}.prepare`, 'expected true');
+    }
+    if (mergeDefaults !== undefined && mergeDefaults !== false) {
+      invalid(`${path}.mergeDefaults`, 'expected false');
+    }
     this.#registrations.set(id, {
       defaults: defaults === undefined ? undefined : copyJson(defaults, `${path}.defaults`),
       factory: factory as AdapterFactory,
+      mergeDefaults,
+      prepare,
     });
     return this;
   }
 }
 
-export function createDefaultRegistry(defaults: BuiltinAdapterDefaults = {}): AdapterRegistry {
+export function createDefaultRegistry(
+  defaults: BuiltinAdapterDefaults = {},
+  extensions: { readonly vite?: Omit<ViteAdapterOptions, 'defaults'> } = {},
+): AdapterRegistry {
+  const viteDefaults =
+    defaults.vite === undefined
+      ? undefined
+      : (copyJson(defaults.vite, 'adapter "vite".defaults') as ViteOptions);
   return new AdapterRegistry()
     .register('shell', {
       defaults: defaults.shell,
@@ -89,8 +126,14 @@ export function createDefaultRegistry(defaults: BuiltinAdapterDefaults = {}): Ad
       factory: async () => (await import('../adapters/clean.js')).createCleanAdapter(),
     })
     .register('vite', {
-      defaults: defaults.vite,
-      factory: async () => (await import('../adapters/vite.js')).createViteAdapter(),
+      defaults: viteDefaults as JsonValue | undefined,
+      factory: async () =>
+        (await import('../adapters/vite.js')).createViteAdapter({
+          ...extensions.vite,
+          defaults: viteDefaults,
+        }),
+      mergeDefaults: false,
+      prepare: true,
     });
 }
 

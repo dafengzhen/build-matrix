@@ -12,6 +12,7 @@ export type {
   AdapterFactory,
   AdapterLoader,
   AdapterOutput,
+  AdapterPreparation,
   Artifact,
   HookFailure,
   LifecycleHooks,

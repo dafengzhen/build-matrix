@@ -2,7 +2,7 @@ import type { BigIntStats } from 'node:fs';
 
 import { createHash } from 'node:crypto';
 import { createReadStream } from 'node:fs';
-import { lstat, readdir } from 'node:fs/promises';
+import { lstat, readdir, stat } from 'node:fs/promises';
 import { join, sep } from 'node:path';
 
 export type PathKind = 'directory' | 'file';
@@ -10,6 +10,41 @@ export type PathKind = 'directory' | 'file';
 interface PathFingerprint {
   readonly digest: string;
   readonly matchedPaths: ReadonlyMap<string, PathKind>;
+}
+
+/** Hash adapter-discovered files, including paths that have not been created yet. */
+export async function fingerprintInputFiles(
+  paths: readonly string[],
+  signal: AbortSignal,
+): Promise<string | undefined> {
+  const hash = createHash('sha256');
+  for (const path of [...new Set(paths)].sort()) {
+    signal.throwIfAborted();
+    try {
+      const before = await stat(path, { bigint: true });
+      if (!before.isFile()) {
+        return undefined;
+      }
+      const contents = createHash('sha256');
+      for await (const chunk of createReadStream(path, { signal })) {
+        contents.update(chunk);
+      }
+      if (!unchanged(before, await stat(path, { bigint: true }))) {
+        return undefined;
+      }
+      hash.update(JSON.stringify([path, contents.digest('hex')]));
+    } catch (error) {
+      signal.throwIfAborted();
+      if (!isFileError(error)) {
+        throw error;
+      }
+      if (error.code !== 'ENOENT' && error.code !== 'ENOTDIR') {
+        return undefined;
+      }
+      hash.update(JSON.stringify([path, null]));
+    }
+  }
+  return hash.digest('hex');
 }
 
 /** Hash declared relative paths without traversing symbolic links or special files. */

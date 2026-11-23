@@ -8,7 +8,12 @@ import type { AdapterOutput, Artifact, TaskContext } from './types.js';
 
 import { renderTemplate } from '../core/template.js';
 import { invalid } from '../core/validation.js';
-import { fingerprintPaths, isFileError, statWorkspacePath } from './fingerprint.js';
+import {
+  fingerprintInputFiles,
+  fingerprintPaths,
+  isFileError,
+  statWorkspacePath,
+} from './fingerprint.js';
 import { writeJsonFile } from './json-file.js';
 import { normalizeOutput } from './result.js';
 
@@ -34,7 +39,9 @@ interface CacheProbe {
 }
 
 interface PreparedCache extends TaskCacheDefinition {
+  readonly additionalKey?: string;
   readonly directory?: string;
+  readonly inputFiles?: readonly string[];
   readonly label: string;
 }
 
@@ -280,7 +287,10 @@ async function taskKey(
   options: JsonValue | undefined,
 ): Promise<string | undefined> {
   const inputs = await fingerprintPaths(root, cache.inputs, context.signal);
-  if (inputs === undefined) {
+  const discovered = cache.inputFiles?.map((path) => resolve(context.cwd, path));
+  const additionalInputs =
+    discovered === undefined ? undefined : await fingerprintInputFiles(discovered, context.signal);
+  if (inputs === undefined || (discovered !== undefined && additionalInputs === undefined)) {
     return undefined;
   }
   const { arch, env, platform, version } = process;
@@ -289,6 +299,8 @@ async function taskKey(
       JSON.stringify({
         adapter,
         adapterVersion: cache.version,
+        additionalInputs,
+        additionalKey: cache.additionalKey,
         cwd: context.cwd,
         environment: cache.env?.map((name) => [name, env[name] ?? null]),
         inputs: inputs.digest,

@@ -354,8 +354,10 @@ it('resolves Vite from the effective inline or top-level root before the task di
       join(vitePackage, 'index.mjs'),
       `
       import { writeFileSync } from 'node:fs';
+      export const loadConfigFromFile = async () => null;
       export const mergeConfig = (inline, overrides) => ({ ...inline, ...overrides });
       export const createBuilder = async () => ({
+        build() {},
         buildApp() { writeFileSync('origin.txt', ${JSON.stringify(origin)}); },
         config: { build: {}, environments: {} },
         environments: {},

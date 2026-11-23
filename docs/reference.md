@@ -13,31 +13,79 @@
 
 ## Adapters
 
-| Adapter | Options and behavior                                                                                                                                                                                                                             |
-| ------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `shell` | `command` is an executable and `args` is an optional array of strings. Arguments are passed directly. To use pipes or redirection, invoke a shell explicitly. Cancellation stops the direct child process.                                       |
-| `clean` | `path` is a relative file or directory inside the task working directory. A missing path succeeds. The working directory itself, external paths, and paths through symbolic links or junctions are rejected.                                     |
-| `vite`  | Optional `root`, `configFile`, `mode`, `outDir`, `viteConfig`, `environments`, and `outputs`. Each invocation runs a one-shot build and reports its disk outputs. Install Vite 8.3.8 or a compatible 8.x release in projects using this adapter. |
+| Adapter | Options and behavior                                                                                                                                                                                         |
+| ------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `shell` | `command` is an executable and `args` is an optional array of strings. Arguments are passed directly. To use pipes or redirection, invoke a shell explicitly. Cancellation stops the direct child process.   |
+| `clean` | `path` is a relative file or directory inside the task working directory. A missing path succeeds. The working directory itself, external paths, and paths through symbolic links or junctions are rejected. |
+| `vite`  | Builds with Vite 8.3.8 or a compatible 8.x release. Each task can select environments, configure their builds, and report disk artifacts.                                                                    |
 
-Set `options.viteConfig` to a JSON object containing inline Vite settings, such as `{ "build": { "sourcemap": true } }`. Vite merges it with the project config file using its usual rules. Explicit top-level `root`, `configFile`, `mode`, and `outDir` take precedence. Paths in those top-level options are relative to the task working directory. Paths inside `viteConfig` follow Vite's rules, so a relative `viteConfig.build.outDir` is relative to the Vite project root.
+### Vite execution and configuration
 
-The adapter resolves Vite from the top-level `root` or `viteConfig.root` first, then from the task working directory, then from Build Matrix. Set one of those root options if Vite lives in a separate package. Resolution happens before Vite loads its project config file.
+`execution: "process"` runs Vite in a child process and is the default. `execution: "in-process"` calls the Vite API in the executor and supports JavaScript plugins and callbacks. An in-process build observes cancellation before and after each environment build. Build Matrix waits for a Vite API call already in progress to settle.
 
-Use `environments` with one name, a list of names, or `"all"`. Named environments build once each in the order listed and run their own Vite build hooks. `"all"` runs Vite's app builder with the project's app-level hooks and orchestration, then builds any remaining environments. Omitting the option keeps Vite's default builder selection. [Vite Environment API](https://vite.dev/guide/api-environment-frameworks#environments-during-build)
+The configuration layers, from lowest to highest priority, are Vite defaults, the project config file, the adapter's `viteConfig`, and the task's `viteConfig`. Nested objects and arrays follow Vite's merge rules. The top-level `root`, `configFile`, `mode`, and `outDir` shortcuts take precedence over their counterparts inside either `viteConfig`. A task shortcut overrides the same adapter shortcut. The shortcuts' paths are relative to the task working directory. Other Vite paths follow Vite's rules, so `viteConfig.build.outDir` is relative to the Vite root. Set `configFile: false` to disable project config loading.
+
+The adapter resolves Vite from the effective inline root first, then from the task working directory, then from Build Matrix. Set `root` when Vite is installed in a separate package.
+
+### Environments
+
+Use `environments` with one name, a list of names, or `"all"`. A list builds in the order given. `"all"` runs the project's app builder and then builds any remaining environments. Omitting the option keeps Vite's default builder selection. [Vite Environment API](https://vite.dev/guide/api-environment-frameworks#environments-during-build)
+
+`environmentOptions` takes a map keyed by environment name. Its `build` entries merge into the corresponding Vite environment, with task values taking precedence over adapter values. The per-environment `root` and `outDir` shortcuts are relative to the task working directory. A root or mode override resolves a separate Vite builder for that environment using the same project config file. Config functions receive the environment's mode.
 
 ```json
 {
+  "artifacts": "files",
   "environments": ["client", "worker"],
-  "outputs": [
-    { "environment": "client", "kind": "directory", "path": "dist/client" },
-    { "environment": "worker", "kind": "file", "path": "dist/worker/index.js" }
-  ]
+  "environmentOptions": {
+    "client": { "outDir": "dist/client" },
+    "worker": {
+      "root": "workers",
+      "mode": "staging",
+      "outDir": "dist/worker",
+      "build": { "sourcemap": true }
+    }
+  }
 }
 ```
 
-`outputs` declares the paths to report and verify after the build. Paths are relative to the task working directory or absolute. Omit `kind` to infer it from disk. Entries with an `environment` apply when that environment builds. Entries without one apply to the whole task. With no `outputs` declaration, the adapter reports the files or directories Vite writes to, including multiple output directories. An in-memory build has no inferred disk outputs.
+### JavaScript extensions
 
-When the task also declares `cache.outputs`, each applicable `options.outputs` path must be listed there or covered by a declared directory. A missing path, the wrong kind, or a cache coverage mismatch fails the Vite task.
+```ts
+import { createDefaultRegistry } from '@dafengzhen/build-matrix/executor';
+
+const registry = createDefaultRegistry(
+  { vite: { execution: 'in-process' } },
+  {
+    vite: {
+      configure(config, { variant }) {
+        config.define = {
+          ...config.define,
+          __VARIANT__: JSON.stringify(variant?.id ?? 'global'),
+        };
+      },
+      plugins: [{ name: 'project-html', transformIndexHtml: (html) => html.trim() }],
+      onEnvironmentEnd({ environment, logger, status }) {
+        logger.info(`${environment} ${status}`);
+      },
+    },
+  },
+);
+```
+
+Pass this registry to `executePlan` or `watchPlan`. `configure(config, context)` can mutate or replace the merged inline config before Vite resolves it. The callback runs when creating a builder and receives `context.environment` when resolving an environment's separate builder. Injected `plugins` accept Vite's `PluginOption[]`, including nested and promised plugins. You can also call `createViteAdapter({ defaults, configure, plugins })` from the Vite adapter subpath. Use `prepare: true` when registering that adapter under a custom ID to enable automatic cache and watch inputs.
+
+`onBuildStart` and `onBuildEnd` wrap an executed build and its artifact collection. `onEnvironmentStart` and `onEnvironmentEnd` wrap each environment build, including those started by the app builder. End events contain `status` and either `result` or `error`. Hook errors fail the task. Cache hits reuse the saved artifacts and skip build hooks.
+
+### Artifacts, cache and watch
+
+The default `artifacts: "directories"` reports Vite's output locations. Use `artifacts: "files"` to report emitted files and copied public files with their environment, byte size, and SHA-256 digest. In-memory builds have no inferred disk artifacts.
+
+Set `outputs` to declare the paths to report and verify after building. Entries accept `path`, `kind`, `environment`, `sizeBytes`, and `sha256`. Paths can be absolute or relative to the task working directory. An environment-specific declaration applies when that environment builds. The programmatic `collectArtifacts(outputs, context)` callback can replace or add candidates. `validateArtifact(output, context)` can apply additional checks by throwing an error. Declared or custom paths must exist, match their expectations, and be covered by `cache.outputs` if the task declares it.
+
+The task cache and default polling watcher track the Vite config and the dependencies reported by Vite's config loader, along with the mode's env files. Continue to declare source files in `cache.inputs` and watch paths. Put additional inputs that project code reads directly in these declarations. JavaScript extensions bypass the task cache by default. Supply a string or callback as `cacheKey` to opt in, and change its value when relevant extension inputs change.
+
+`builder: "once"` creates a new builder for each build. With `execution: "in-process"` and `builder: "reuse"`, the adapter retains a builder per task and variant for use across repeated calls with the same registry. Source edits trigger a fresh build with the same builder. Configuration dependency changes, option changes, a changed `cacheKey`, or a failed Vite build discard the builder. Build Matrix's watcher schedules these builds using its usual debounce and cancellation behavior.
 
 ## Filters and reports
 
