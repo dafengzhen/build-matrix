@@ -2,7 +2,7 @@ import type { JsonObject, MatrixDefinition, StageDefinition } from '@dafengzhen/
 import type { TestContext } from 'vitest';
 
 import { createPlan } from '@dafengzhen/build-matrix';
-import { createDefaultRegistry, executePlan } from '@dafengzhen/build-matrix/executor';
+import { createDefaultRegistry, executePlan, watchPlan } from '@dafengzhen/build-matrix/executor';
 import { execFile } from 'node:child_process';
 import { cp, mkdir, mkdtemp, readdir, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -237,7 +237,7 @@ it(
   },
 );
 
-it('reports inferred Vite outputs relative to a linked task directory', async (t) => {
+it('reports Vite outputs and watch changes relative to a linked task directory', async (t) => {
   const parent = await workspace(t);
   const root = join(parent, 'project');
   const cwd = join(parent, 'linked');
@@ -271,6 +271,28 @@ it('reports inferred Vite outputs relative to a linked task directory', async (t
   ]);
   const cached = await executePlan(plan, { cwd, signal: t.signal });
   expect(cached.counts.cached).toBe(1);
+
+  const controller = new AbortController();
+  const changes: string[][] = [];
+  await watchPlan(plan, {
+    cache: false,
+    cwd,
+    debounceMs: 10,
+    async onRun(result) {
+      assert.strictEqual(result.status, 'success', JSON.stringify(result));
+      const { changedPaths, number } = result.watch!;
+      if (number === 1) {
+        await writeFile(join(cwd, 'index.html'), '<p>Updated Build Matrix</p>');
+      } else {
+        changes.push([...changedPaths]);
+        controller.abort();
+      }
+    },
+    paths: ['index.html'],
+    pollIntervalMs: 10,
+    signal: AbortSignal.any([controller.signal, t.signal]),
+  });
+  expect(changes).toStrictEqual([['index.html']]);
 });
 
 it(

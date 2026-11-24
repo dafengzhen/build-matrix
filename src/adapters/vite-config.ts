@@ -1,6 +1,6 @@
 import type * as Vite from 'vite';
 
-import { resolve } from 'node:path';
+import { relative, resolve } from 'node:path';
 
 import type { JsonObject } from '../core/types.js';
 import type { ViteEnvironmentOptions, ViteOptions, ViteOutput } from './vite.js';
@@ -14,6 +14,7 @@ import {
   copyJson,
   invalid,
 } from '../core/validation.js';
+import { containsPath, physicalPath } from '../executor/artifacts.js';
 
 export interface BuildRequest {
   readonly cwd: string;
@@ -62,11 +63,12 @@ export function configCandidates({ cwd, defaults, task }: BuildRequest): string[
   if (file === false) {
     return [];
   }
+  const inputPath = viteInputPath(cwd);
   if (file !== undefined) {
-    return [resolve(cwd, asPath(file, 'vite options configFile'))];
+    return [inputPath(asPath(file, 'vite options configFile'))];
   }
   const root = viteRoot({ cwd, defaults, task });
-  return viteConfigFiles.map((name) => resolve(root, name));
+  return viteConfigFiles.map((name) => inputPath(resolve(root, name)));
 }
 
 export function configInputs(
@@ -105,7 +107,7 @@ export async function inspectVite(vite: ViteApi, request: BuildRequest): Promise
       ...publicInputs(project.config),
     );
   }
-  return [...new Set(inputs)];
+  return [...new Set(inputs.map(viteInputPath(request.cwd)))];
 }
 
 export async function loadProject(
@@ -286,6 +288,22 @@ export function readOutputs(value: unknown, label: string): readonly ViteOutput[
       ...(sizeBytes === undefined ? {} : { sizeBytes }),
     };
   });
+}
+
+export function viteInputPath(cwd: string): (path: string) => string {
+  let physicalCwd: string | undefined;
+  return (path) => {
+    const absolute = resolve(cwd, path);
+    if (containsPath(cwd, absolute)) {
+      return absolute;
+    }
+    // Vite can expand short directory names or resolve directory links when reporting inputs.
+    physicalCwd ??= physicalPath(cwd);
+    const physical = containsPath(physicalCwd, absolute) ? absolute : physicalPath(absolute);
+    return containsPath(physicalCwd, physical)
+      ? resolve(cwd, relative(physicalCwd, physical))
+      : absolute;
+  };
 }
 
 export function viteRoot({ cwd, defaults, task }: BuildRequest): string {

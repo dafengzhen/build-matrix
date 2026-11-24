@@ -18,6 +18,7 @@ import {
   configInputs,
   loadProject,
   publicInputs,
+  viteInputPath,
   withViteEnv,
 } from './vite-config.js';
 
@@ -52,6 +53,7 @@ export async function createViteSession(
   const { artifacts, environmentOptions, environments, outputs } = buildSettings(vite, request);
   const written = new Map<string, ViteOutput>();
   let activeLogger = context?.logger;
+  const inputPath = viteInputPath(request.cwd);
   const dependencies = new Set(configCandidates(request));
   const inputs = new Set<string>();
   const publicDirectories = new Set<string>();
@@ -86,10 +88,11 @@ export async function createViteSession(
         cleanups.push(cleanup);
       },
       async trackInputs(paths, timing) {
-        for (const path of paths) {
-          dependencies.add(resolve(request.cwd, path));
+        const tracked = paths.map(inputPath);
+        for (const path of tracked) {
+          dependencies.add(path);
         }
-        await context.trackInputs?.(paths, timing);
+        await context.trackInputs?.(tracked, timing);
       },
     };
   }
@@ -99,7 +102,7 @@ export async function createViteSession(
         for (const id of this.getModuleIds()) {
           const path = id.split('?', 1)[0];
           if (isAbsolute(path) && !path.includes('\0')) {
-            inputs.add(path);
+            inputs.add(inputPath(path));
           }
         }
       },
@@ -183,7 +186,7 @@ export async function createViteSession(
     };
     config.root = resolve(request.cwd, config.root ?? '.');
     for (const path of [...project.dependencies, ...configInputs(config)]) {
-      dependencies.add(path);
+      dependencies.add(inputPath(path));
     }
     if (activeLogger !== undefined && config.customLogger === undefined) {
       config.customLogger = vite.createLogger(config.logLevel, {
@@ -215,7 +218,7 @@ export async function createViteSession(
             configFileDependencies: [...new Set(project.dependencies)],
           });
           for (const path of configInputs(resolved)) {
-            dependencies.add(path);
+            dependencies.add(inputPath(path));
           }
           if (configure !== undefined) {
             await extensions.resolvedConfig?.(resolved, configure);
@@ -253,7 +256,7 @@ export async function createViteSession(
     for (const environment of Object.values(builder.environments)) {
       environment.config.build.watch = null;
       for (const path of publicInputs(environment.config)) {
-        publicDirectories.add(path);
+        publicDirectories.add(inputPath(path));
       }
     }
     return { builder, projectFile: project.projectFile };
@@ -261,7 +264,7 @@ export async function createViteSession(
 
   function addInput(id: string, cwd: string) {
     if (!id.includes('\0')) {
-      inputs.add(resolve(cwd, id));
+      inputs.add(inputPath(resolve(cwd, id)));
     }
   }
 
