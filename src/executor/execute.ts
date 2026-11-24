@@ -1,15 +1,14 @@
 import { randomUUID } from 'node:crypto';
-import { addAbortListener } from 'node:events';
 import { resolve } from 'node:path';
 
 import type { Plan, PlannedStage, PlannedTask, ResourceLimits, Variant } from '../core/types.js';
-import type { CacheOptions } from './cache.js';
+import type { ArtifactOptions } from './artifacts.js';
+import type { CacheOptions, PreparedCache } from './cache.js';
 import type { RunFilter } from './filter.js';
 import type { AdapterRegistry } from './registry.js';
 import type { ScheduledTask } from './scheduler.js';
 import type {
-  Adapter,
-  AdapterPreparation,
+  Artifact,
   LifecycleHooks,
   Logger,
   RunResult,
@@ -19,25 +18,22 @@ import type {
   TaskResult,
   WatchRunInfo,
 } from './types.js';
+import type { UnitServices, UnitState } from './unit.js';
 
-import { renderOptions } from '../core/template.js';
+import { renderOptions, renderTemplate } from '../core/template.js';
 import { asPath, asPositiveInteger, asResourceLimits, invalid } from '../core/validation.js';
-import {
-  defaultCacheDirectory,
-  prepareCache,
-  probeTaskCache,
-  reportDeclaredArtifacts,
-  saveTaskCache,
-  validateStageCaches,
-} from './cache.js';
+import { ArtifactClaims, reconcileArtifacts } from './artifacts.js';
+import { defaultCacheDirectory, prepareCache, validateStageCaches } from './cache.js';
 import { selectInvocations } from './filter.js';
 import { createLifecycle } from './lifecycle.js';
 import { createDetailedReport, createManifest, writeManifest } from './manifest.js';
 import { createDefaultRegistry } from './registry.js';
-import { createTaskCounts, normalizeError, normalizeOutput } from './result.js';
+import { createTaskCounts, normalizeError } from './result.js';
 import { StageScheduler } from './scheduler.js';
+import { affected, runUnit, unitKey } from './unit.js';
 
 export interface ExecuteOptions {
+  readonly artifacts?: ArtifactOptions;
   readonly cache?: CacheOptions | false;
   readonly cwd?: string;
   readonly filter?: RunFilter;
@@ -52,7 +48,7 @@ export interface ExecuteOptions {
 }
 
 interface Invocation {
-  readonly cache?: ReturnType<typeof prepareCache>;
+  readonly cache?: PreparedCache;
   readonly context: TaskContext;
   readonly selected: boolean;
   readonly task: PlannedTask;
@@ -62,8 +58,15 @@ const quietLogger: Logger = { error() {}, info() {} };
 type Lifecycle = ReturnType<typeof createLifecycle>;
 
 /** Execute a plan produced by createPlan, retaining declaration order in the report. */
-export function executePlan(plan: Plan, options: ExecuteOptions = {}): Promise<RunResult> {
-  return runPlan(plan, options);
+export async function executePlan(plan: Plan, options: ExecuteOptions = {}): Promise<RunResult> {
+  const registry = options.registry ?? createDefaultRegistry();
+  try {
+    return await runPlan(plan, { ...options, registry });
+  } finally {
+    if (options.registry === undefined) {
+      await registry.dispose();
+    }
+  }
 }
 
 export async function runPlan(
@@ -71,6 +74,8 @@ export async function runPlan(
   options: ExecuteOptions,
   watch?: WatchRunInfo,
   trackInputs?: TaskContext['trackInputs'],
+  state = new Map<string, UnitState>(),
+  incremental = false,
 ): Promise<RunResult> {
   const registry = options.registry ?? createDefaultRegistry();
   const concurrency =
@@ -80,7 +85,6 @@ export async function runPlan(
   const cwd = options.cwd === undefined ? process.cwd() : resolve(asPath(options.cwd, 'cwd'));
   const signal = options.signal ?? new AbortController().signal;
   const logger = options.logger ?? quietLogger;
-  const selected = selectInvocations(plan, options.filter);
   const overrides =
     options.resourceLimits === undefined
       ? undefined
@@ -101,6 +105,7 @@ export async function runPlan(
     invalid('manifestVersion', 'expected 1 or 2');
   }
   const runId = randomUUID();
+  const selected = selectionWithDependencies(plan, options.filter);
   const planned = plan.stages.map((stage) => ({
     invocations: listInvocations(
       stage,
@@ -113,6 +118,47 @@ export async function runPlan(
     ),
     stage,
   }));
+  const claims = new ArtifactClaims();
+  const active = planned.flatMap(({ invocations }) =>
+    invocations.filter(({ selected }) => selected),
+  );
+  for (const { cache, context } of active) {
+    claims.claim(
+      owner(context),
+      (cache?.outputs ?? []).map((path) => resolve(cwd, path)),
+    );
+  }
+  const watchChanges =
+    incremental && watch !== undefined && watch.number > 1
+      ? watch.changedPaths.map((path) => resolve(cwd, path))
+      : undefined;
+  const dirty = new Set<string>();
+  const upstream = new Map<string, Invocation[]>();
+  for (const invocation of active) {
+    const { context, task } = invocation;
+    const key = unitKey(context);
+    if (
+      watchChanges === undefined ||
+      affected(state.get(key), watchChanges) ||
+      dependenciesOf(invocation, upstream).some((producer) => dirty.has(unitKey(producer.context)))
+    ) {
+      dirty.add(key);
+    }
+    const invocations = upstream.get(task.id) ?? [];
+    invocations.push(invocation);
+    upstream.set(task.id, invocations);
+  }
+  const completed = new Map<string, TaskResult>();
+  const services: Omit<UnitServices, 'reserve' | 'visited'> = {
+    artifacts: options.artifacts,
+    cacheDirectory,
+    cacheOptions: options.cache || undefined,
+    changed: watchChanges,
+    lifecycle,
+    registry,
+    runData: new Map(),
+    state,
+  };
   const startedAt = new Date().toISOString();
   const started = performance.now();
   const counts = createTaskCounts();
@@ -120,8 +166,9 @@ export async function runPlan(
   const watchInfo = watch === undefined ? {} : { watch };
   await lifecycle.emit('onRunStart', { runId, scheduling, startedAt, ...watchInfo });
 
+  let stopped = false;
   for (const { invocations, stage } of planned) {
-    const inactive = signal.aborted ? 'cancelled' : counts.failed > 0 ? 'skipped' : undefined;
+    const inactive = signal.aborted ? 'cancelled' : stopped ? 'skipped' : undefined;
     const filtered =
       invocations.length > 0 && invocations.every((invocation) => !invocation.selected);
     let result: StageResult;
@@ -141,10 +188,33 @@ export async function runPlan(
       const stageResult = await runStage(
         stage,
         invocations,
-        registry,
         scheduling,
         signal,
         lifecycle,
+        async (invocation) => {
+          if (!dirty.has(unitKey(invocation.context))) {
+            const outputs = state.get(unitKey(invocation.context))?.output?.outputs;
+            claims.claim(
+              owner(invocation.context),
+              (outputs ?? []).map(({ path }) => resolve(cwd, path)),
+            );
+            return {
+              ...taskIdentity(invocation),
+              ...(outputs === undefined ? {} : { outputs }),
+              skipReason: 'unchanged',
+              status: 'skipped',
+            };
+          }
+          const producers = dependenciesOf(invocation, upstream);
+          const force = producers.some((producer) => dirty.has(unitKey(producer.context)));
+          return runTask(
+            invocation,
+            { ...services, ...(force ? { changed: undefined } : {}) },
+            producers,
+            completed,
+            claims,
+          );
+        },
       );
       result = {
         ...stageResult,
@@ -154,9 +224,11 @@ export async function runPlan(
       };
       await lifecycle.emit('onStageFinish', { runId, stage: result }, { stageId });
     }
-    for (const task of result.tasks) {
+    for (const [index, task] of result.tasks.entries()) {
       counts[task.status]++;
+      completed.set(unitKey(invocations[index].context), task);
     }
+    stopped ||= result.status === 'failed' && stage.failurePolicy !== 'continue-pipeline';
     stages.push(result);
   }
 
@@ -179,11 +251,44 @@ export async function runPlan(
     result = { ...result, hookErrors: [...lifecycle.errors] };
   }
   if (manifestPath !== undefined) {
+    if (
+      options.artifacts?.cleanup !== undefined &&
+      result.status === 'success' &&
+      options.filter?.taskIds === undefined &&
+      options.filter?.variantIds === undefined
+    ) {
+      await reconcileArtifacts(
+        cwd,
+        manifestPath,
+        options.artifacts.cleanup,
+        stages.flatMap(({ tasks }) => tasks),
+        signal,
+      );
+    }
     const manifest =
       manifestVersion === 2 ? createDetailedReport(plan, result) : createManifest(plan, result);
     await writeManifest(manifestPath, manifest);
   }
   return result;
+}
+
+function dependenciesOf(
+  invocation: Invocation,
+  upstream: ReadonlyMap<string, readonly Invocation[]>,
+): Invocation[] {
+  const variant = invocation.context.variant?.id;
+  return (invocation.task.consumes ?? []).flatMap((id) =>
+    (upstream.get(id) ?? []).filter(
+      ({ context }) =>
+        variant === undefined || context.variant === undefined || context.variant.id === variant,
+    ),
+  );
+}
+
+function dependencyUnavailable(id: string) {
+  return Object.assign(new Error(`Artifacts from task "${id}" are unavailable`), {
+    code: 'ARTIFACT_DEPENDENCY_UNAVAILABLE',
+  });
 }
 
 function listInvocations(
@@ -233,24 +338,17 @@ function listInvocations(
   return invocations;
 }
 
-async function loadAdapter(registry: AdapterRegistry, id: string, signal: AbortSignal) {
-  signal.throwIfAborted();
-  const cancelled = Promise.withResolvers<never>();
-  const listener = addAbortListener(signal, () => cancelled.reject(signal.reason));
-  try {
-    return await Promise.race([registry.load(id), cancelled.promise]);
-  } finally {
-    listener[Symbol.dispose]();
-  }
+function owner({ stageId, taskId, variant }: TaskContext): string {
+  return `task "${stageId}/${taskId}"${variant === undefined ? '' : ` (${variant.id})`}`;
 }
 
 async function runStage(
   stage: PlannedStage,
   invocations: readonly Invocation[],
-  registry: AdapterRegistry,
   scheduling: SchedulingInfo,
   signal: AbortSignal,
   lifecycle: Lifecycle,
+  run: (invocation: Invocation) => Promise<TaskResult>,
 ): Promise<StageResult> {
   const results: (TaskResult | undefined)[] = [];
   const scheduler = new StageScheduler(invocations, scheduling);
@@ -264,7 +362,7 @@ async function runStage(
     const { index } = scheduled;
     active++;
     try {
-      const result = await runTask(invocations[index], registry, lifecycle);
+      const result = await run(invocations[index]);
       results[index] = result;
       if (result.status === 'failed') {
         failed = true;
@@ -314,12 +412,14 @@ async function runStage(
 
 async function runTask(
   invocation: Invocation,
-  registry: AdapterRegistry,
-  lifecycle: Lifecycle,
+  service: Omit<UnitServices, 'reserve' | 'visited'>,
+  producers: readonly Invocation[],
+  completed: ReadonlyMap<string, TaskResult>,
+  claims: ArtifactClaims,
 ): Promise<TaskResult> {
   const { context, task } = invocation;
-  let { cache } = invocation;
   const { signal, variant } = context;
+  const { lifecycle, registry, state } = service;
   const identity = taskIdentity(invocation);
   const startedAt = new Date().toISOString();
   const started = performance.now();
@@ -329,75 +429,104 @@ async function runTask(
     finishedAt: new Date().toISOString(),
     startedAt,
   });
-  const merged = registry.mergeTaskOptions(task.adapter, task.options);
-  const options = merged === undefined ? undefined : renderOptions(merged, variant?.values ?? {});
+  const key = unitKey(context);
+  const visited = new Set<string>();
   await lifecycle.emit('onTaskStart', { ...identity, startedAt }, identity);
   try {
     signal.throwIfAborted();
-    let adapter: Adapter | undefined;
-    let prepared: AdapterPreparation | undefined;
-    if (
-      registry.prepares(task.adapter) &&
-      (cache?.directory !== undefined || context.trackInputs)
-    ) {
-      try {
-        adapter = await loadAdapter(registry, task.adapter, signal);
-        prepared = await adapter.prepare?.(context, options);
-        if (prepared?.inputs !== undefined) {
-          await context.trackInputs?.(prepared.inputs);
-        }
-      } catch (error) {
-        signal.throwIfAborted();
-        return { ...finish(), error: normalizeError(error), status: 'failed' };
+    const dependencies = new Map<string, Artifact[]>();
+    for (const producer of producers) {
+      const result = completed.get(unitKey(producer.context));
+      if (
+        result?.status !== 'success' &&
+        result?.status !== 'cached' &&
+        result?.skipReason !== 'unchanged'
+      ) {
+        throw dependencyUnavailable(producer.task.id);
       }
-      if (cache !== undefined && prepared !== undefined) {
-        const { cacheKey, inputs } = prepared;
-        cache = {
-          ...cache,
-          additionalKey: cacheKey === false ? undefined : cacheKey,
-          directory: cacheKey === false ? undefined : cache.directory,
-          inputFiles: inputs,
-        };
+      const artifacts = dependencies.get(producer.task.id) ?? [];
+      artifacts.push(...(result.outputs ?? []));
+      dependencies.set(producer.task.id, artifacts);
+    }
+    for (const id of task.consumes ?? []) {
+      if (!dependencies.has(id)) {
+        throw dependencyUnavailable(id);
       }
     }
-    const probe =
-      cache === undefined ? undefined : await probeTaskCache(cache, context, task.adapter, options);
+    const merged = registry.mergeTaskOptions(task.adapter, task.options);
+    const outcome = await runUnit(
+      {
+        adapterId: task.adapter,
+        cache:
+          invocation.cache === undefined
+            ? undefined
+            : { ...invocation.cache, settings: service.cacheOptions },
+        context,
+        dependencies,
+        environment:
+          task.environment === undefined
+            ? undefined
+            : renderTemplate(task.environment, variant?.values ?? {}),
+        options: merged === undefined ? undefined : renderOptions(merged, variant?.values ?? {}),
+        path: [],
+        taskData: new Map(),
+      },
+      { ...service, reserve: (paths) => claims.claim(owner(context), paths), visited },
+    );
     signal.throwIfAborted();
-    let output = probe?.hit;
-    const status = output === undefined ? 'success' : 'cached';
-    if (output === undefined) {
-      try {
-        adapter ??= await loadAdapter(registry, task.adapter, signal);
-        signal.throwIfAborted();
-        output = normalizeOutput(
-          await (prepared?.run ? prepared.run() : adapter.run(context, options)),
-        );
-      } catch (error) {
-        signal.throwIfAborted();
-        return { ...finish(), error: normalizeError(error), status: 'failed' };
+    for (const step of state.keys()) {
+      if (step.startsWith(key.slice(0, -1) + ',') && !visited.has(step)) {
+        state.delete(step);
       }
     }
-    signal.throwIfAborted();
-    const reported =
-      cache === undefined ? output : await reportDeclaredArtifacts(cache, output, context);
-    signal.throwIfAborted();
-    const result: TaskResult = { ...reported, ...finish(), status };
-    if (status === 'success' && cache !== undefined && probe !== undefined) {
-      try {
-        await saveTaskCache(cache, probe, context, task.adapter, options, output);
-      } catch (error) {
-        if (!signal.aborted) {
-          throw error;
-        }
-      }
-    }
-    return result;
+    return {
+      ...outcome.output,
+      ...(outcome.cacheMiss === undefined ? {} : { cacheMiss: outcome.cacheMiss }),
+      ...finish(),
+      status: outcome.status === 'unchanged' ? 'skipped' : outcome.status,
+    };
   } catch (error) {
-    if (!signal.aborted) {
-      throw error;
-    }
-    return { ...finish(), status: 'cancelled' };
+    state.set(key, { inputs: state.get(key)?.inputs ?? [] });
+    return signal.aborted
+      ? { ...finish(), status: 'cancelled' }
+      : { ...finish(), error: normalizeError(error), status: 'failed' };
   }
+}
+
+function selectionWithDependencies(plan: Plan, filter?: RunFilter) {
+  const selected = selectInvocations(plan, filter);
+  const required = new Set<string>();
+  const tasks = new Map(
+    plan.stages.flatMap(({ tasks }) => tasks.map((task) => [task.id, task] as const)),
+  );
+  const key = (id: string, variantId?: string) => JSON.stringify([id, variantId]);
+  function visit(task: PlannedTask, variantId?: string) {
+    const identity = key(task.id, variantId);
+    if (required.has(identity)) {
+      return;
+    }
+    required.add(identity);
+    for (const id of task.consumes ?? []) {
+      const producer = tasks.get(id)!;
+      if (producer.scope === 'global' || variantId !== undefined) {
+        visit(producer, producer.scope === 'global' ? undefined : variantId);
+      } else {
+        for (const variant of plan.variants) {
+          visit(producer, variant.id);
+        }
+      }
+    }
+  }
+  for (const task of tasks.values()) {
+    for (const variantId of task.scope === 'global'
+      ? [undefined]
+      : plan.variants.map(({ id }) => id)) {
+      if (selected(task.id, variantId)) {
+        visit(task, variantId);
+      }
+    }
+  }
+  return (taskId: string, variantId?: string) => required.has(key(taskId, variantId));
 }
 
 function taskIdentity({ context, task }: Invocation) {

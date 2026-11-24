@@ -82,3 +82,28 @@ node dist/cli/bin.js examples/08-vite-environments/build-matrix.json --json --de
 ```
 
 一个 Vite 任务依次构建 `client` 和 `ssr`，并校验 `dist/client/index.html` 和 `dist/server/render.js` 两个产物。报告会标明各产物所属的环境。产物路径相对于示例目录。[Build Matrix 配置](./08-vite-environments/build-matrix.json) · [Vite 配置](./08-vite-environments/vite.config.ts)
+
+## 09 从上游产物生成发布索引
+
+```sh
+node examples/09-artifact-pipeline/run.ts
+```
+
+脚本只选中全局任务 `release-index`，其 `consumes` 声明会自动选中两个语言变体的 `release-notes` 任务。索引任务通过 `artifacts.get()` 读取已发布的产物路径，并将其写入 `dist/release.json`。两个适配器均通过 `artifacts.stage()` 写入临时路径，任务成功后再发布文件。可在示例目录的 `reports/release.json` 中查看任务结果和产物路径。[脚本](./09-artifact-pipeline/run.ts)
+
+## 10 按目标增量监听
+
+```sh
+node dist/cli/bin.js examples/10-incremental-watch/build-matrix.json --watch-incremental --watch-strategy native --json --detailed --manifest reports/latest.json
+```
+
+首次运行完成后，修改示例目录中的 `src/web.txt`。监听器根据 `cache.inputs` 找到该文件，重建 `dist/web.txt`，并将 `worker` 标记为 `skipped`，其 `skipReason` 为 `"unchanged"`。修改共享输入 `src/header.txt` 会重建两个目标。可在 `reports/latest.json` 中查看 `watch.changes` 和任务状态。按 Ctrl+C 停止监听。[配置](./10-incremental-watch/build-matrix.json)
+
+## 11 在同一仓库中构建多个 Vite 应用
+
+```sh
+node dist/cli/bin.js examples/11-vite-monorepo/build-matrix.json --max-concurrency 2 --json --detailed
+node dist/cli/bin.js examples/11-vite-monorepo/build-matrix.json --variant admin
+```
+
+第一条命令并行构建 `apps/storefront` 和 `apps/admin`。通过 `root` 和 `outDir` 中的模板，每个应用都会在示例目录中生成各自的 `dist/<app>/index.html`。`artifacts: "files"` 让详细报告包含各文件的大小和 SHA-256 摘要。第二条命令只构建 `admin`。[配置](./11-vite-monorepo/build-matrix.json)

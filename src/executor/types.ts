@@ -1,26 +1,53 @@
-import type { JsonObject, JsonValue, ResourceLimits, Variant } from '../core/types.js';
+import type {
+  JsonObject,
+  JsonValue,
+  ResourceLimits,
+  TaskCacheDefinition,
+  Variant,
+} from '../core/types.js';
+import type { AdapterRegistry } from './registry.js';
 
-export interface Adapter<Options = unknown> {
+export interface Adapter<Options = unknown, Context extends TaskContext = AdapterContext> {
+  dispose?(): Awaitable<void>;
   /** Discover additional inputs before a cache lookup or a watched build. */
-  prepare?(context: TaskContext, options: Options): Promise<AdapterPreparation>;
-  run(context: TaskContext, options: Options): Promise<AdapterOutput>;
+  prepare?(context: Context, options: Options): Awaitable<AdapterPreparation | void>;
+  run?(context: Context, options: Options): Awaitable<AdapterOutput>;
 }
 
-export interface AdapterDefinition<Options = unknown> {
+export interface AdapterContext extends TaskContext {
+  readonly artifacts: ArtifactContext;
+  readonly cacheEnabled: boolean;
+  readonly environment?: string;
+  readonly runData: Map<unknown, unknown>;
+  readonly stepPath: readonly string[];
+  readonly taskData: Map<unknown, unknown>;
+  trackInputs(paths: readonly string[], timing?: InputDiscovery): Promise<void>;
+  readonly watching: boolean;
+}
+
+export type AdapterDefinition<
+  Options = unknown,
+  Scope extends 'invocation' | undefined = 'invocation' | undefined,
+> = {
   readonly defaults?: JsonValue;
-  readonly factory: AdapterFactory<Options>;
   /** Set false when the factory provides defaults to an adapter that merges its own options. */
   readonly mergeDefaults?: false;
   /** Load the adapter before probing the cache to call adapter.prepare(). */
   readonly prepare?: true;
-}
-
-export type AdapterFactory<Options = unknown> = () => Adapter<Options> | Promise<Adapter<Options>>;
+} & (Scope extends 'invocation'
+  ? { readonly factory: InvocationAdapterFactory<Options>; readonly scope: 'invocation' }
+  : { readonly factory: AdapterFactory<Options>; readonly scope?: undefined });
+export type AdapterFactory<Options = unknown> = () => Awaitable<Adapter<Options>>;
 
 export type AdapterLoader<Options = unknown> = () =>
   | { default: Adapter<Options> }
   | Adapter<Options>
   | Promise<{ default: Adapter<Options> } | Adapter<Options>>;
+
+export type AdapterMiddleware = (
+  invocation: { readonly context: AdapterContext; readonly options: JsonValue | undefined },
+  next: () => Promise<AdapterOutput>,
+) => Awaitable<AdapterOutput>;
 
 export interface AdapterOutput {
   readonly metadata?: JsonObject;
@@ -28,12 +55,30 @@ export interface AdapterOutput {
   readonly outputs?: readonly Artifact[];
 }
 
+export interface AdapterPlugin {
+  readonly middleware?: readonly AdapterMiddleware[];
+  setup?(registry: AdapterRegistry): void;
+}
+
 export interface AdapterPreparation {
   /** Set false to bypass the task cache, or supply an additional cache key. */
   readonly cacheKey?: false | string;
-  /** Extra input files. Missing files are also tracked for creation. */
+  /** Extra input paths, including paths that have not been created yet. */
   readonly inputs?: readonly string[];
-  run?(): Promise<AdapterOutput>;
+  run?(): Awaitable<AdapterOutput>;
+  /** Dependencies are local step IDs and execute before their consumers. */
+  readonly steps?: readonly AdapterStep[];
+}
+
+export interface AdapterStep {
+  readonly adapter?: Adapter | string;
+  readonly cache?: TaskCacheDefinition;
+  readonly dependsOn?: readonly string[];
+  readonly environment?: string;
+  readonly id: string;
+  readonly inputs?: readonly string[];
+  readonly options?: JsonValue;
+  run?(context: AdapterContext): Awaitable<AdapterOutput>;
 }
 
 export interface Artifact {
@@ -45,6 +90,17 @@ export interface Artifact {
   readonly sizeBytes?: number;
 }
 
+export interface ArtifactContext {
+  /** Artifacts from declared upstream tasks and completed sibling steps. */
+  get(id: string): readonly Artifact[];
+  register(artifact: Artifact): void;
+  /** Reserve a destination before a direct write. */
+  reserve(path: string): Promise<void>;
+  /** Get a temporary path to write. The executor publishes it on success. */
+  stage(artifact: Artifact): Promise<string>;
+  validate(artifact: Artifact): Promise<Artifact>;
+}
+
 export interface HookFailure {
   readonly error: TaskError;
   readonly hook: keyof LifecycleHooks;
@@ -53,7 +109,24 @@ export interface HookFailure {
   readonly variantId?: string;
 }
 
+export interface InputDiscovery {
+  /** Indicate that these inputs may have been read already. */
+  readonly late?: boolean;
+}
+
+export type InvocationAdapterFactory<Options = unknown> = (
+  context: AdapterContext,
+) => Awaitable<Adapter<Options>>;
+
 export interface LifecycleHooks {
+  onAdapterFinish?(
+    event: {
+      readonly cacheMiss?: readonly string[];
+      readonly error?: TaskError;
+      readonly status: TaskStatus;
+    } & AdapterEvent,
+  ): HookResult;
+  onAdapterStart?(event: AdapterEvent): HookResult;
   onRunFinish?(result: RunResult): HookResult;
   onRunStart?(event: RunStart): HookResult;
   onStageFinish?(event: { readonly runId: string; readonly stage: StageResult }): HookResult;
@@ -61,7 +134,6 @@ export interface LifecycleHooks {
   onTaskFinish?(result: TaskResult): HookResult;
   onTaskStart?(event: TaskStart): HookResult;
 }
-
 export interface Logger {
   error(message: string): void;
   info(message: string): void;
@@ -78,12 +150,13 @@ export interface RunResult {
   readonly status: 'cancelled' | 'failed' | 'success';
   readonly watch?: WatchRunInfo;
 }
+
 export interface SchedulingInfo {
   readonly maxConcurrency: number;
   readonly resourceLimits: ResourceLimits;
 }
 
-export type SkipReason = 'fail-fast' | 'filtered' | 'stage-failed';
+export type SkipReason = 'fail-fast' | 'filtered' | 'stage-failed' | 'unchanged';
 
 export interface StageResult {
   readonly durationMs?: number;
@@ -95,7 +168,6 @@ export interface StageResult {
 }
 
 export type StageStatus = Exclude<TaskStatus, 'cached'>;
-
 export interface TaskContext {
   /** Rendered cache output paths relative to cwd, when the task declares a cache. */
   readonly cacheOutputs?: readonly string[];
@@ -106,7 +178,7 @@ export interface TaskContext {
   readonly stageId: string;
   readonly taskId: string;
   /** Register input files as soon as they are known during a watched run. */
-  readonly trackInputs?: (paths: readonly string[]) => Promise<void>;
+  readonly trackInputs?: (paths: readonly string[], timing?: InputDiscovery) => Promise<void>;
   readonly variant?: Variant;
 }
 
@@ -119,6 +191,7 @@ export interface TaskError {
 
 export interface TaskResult extends AdapterOutput {
   readonly adapter: string;
+  readonly cacheMiss?: readonly string[];
   readonly durationMs?: number;
   readonly error?: TaskError;
   readonly finishedAt?: string;
@@ -137,6 +210,10 @@ export interface WatchAdapter {
   watch(context: WatchContext): Promise<void>;
 }
 
+export type WatchChange =
+  | { readonly from: string; readonly kind: 'renamed'; readonly path: string }
+  | { readonly kind: 'added' | 'deleted' | 'modified'; readonly path: string };
+
 export interface WatchContext {
   readonly cwd: string;
   readonly debounceMs?: number;
@@ -153,14 +230,24 @@ export interface WatchContext {
     changedPaths: readonly string[],
     signal?: AbortSignal,
     trackInputs?: TaskContext['trackInputs'],
+    changes?: readonly WatchChange[],
   ): Promise<void>;
   readonly signal: AbortSignal;
+  /** Absolute dynamic paths, replaced as adapters rediscover their dependencies. */
+  trackedPaths?(): readonly string[];
 }
 
 export interface WatchRunInfo {
   readonly changedPaths: readonly string[];
+  readonly changes?: readonly WatchChange[];
   readonly number: number;
 }
+type AdapterEvent = {
+  readonly environment?: string;
+  readonly stepPath: readonly string[];
+  readonly variantId?: string;
+} & Pick<TaskContext, 'runId' | 'stageId' | 'taskId'>;
+type Awaitable<T> = Promise<T> | T;
 type HookResult = Promise<void> | void;
 
 type RunStart = Pick<RunResult, 'runId' | 'scheduling' | 'startedAt' | 'watch'>;

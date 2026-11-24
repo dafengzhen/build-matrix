@@ -1,13 +1,15 @@
 import { createHash } from 'node:crypto';
 import { readFile, realpath } from 'node:fs/promises';
-import { isAbsolute, join, parse, relative, resolve, sep } from 'node:path';
+import { basename, dirname, isAbsolute, join, parse, relative, resolve, sep } from 'node:path';
 
 import type { JsonValue, TaskCacheDefinition } from '../core/types.js';
+import type { CacheBackend } from './cache-backend.js';
 import type { PathKind } from './fingerprint.js';
-import type { AdapterOutput, Artifact, TaskContext } from './types.js';
+import type { AdapterContext, AdapterOutput, Artifact, TaskContext } from './types.js';
 
 import { renderTemplate } from '../core/template.js';
 import { invalid } from '../core/validation.js';
+import { restoreCacheOutputs, snapshotCacheOutputs } from './cache-backend.js';
 import {
   fingerprintInputFiles,
   fingerprintPaths,
@@ -21,7 +23,22 @@ const schemaVersion = 1;
 export const defaultCacheDirectory = '.build-matrix-cache';
 
 export interface CacheOptions {
+  readonly backend?: CacheBackend;
   readonly directory?: string;
+  /** Add a custom component to the cache fingerprint. */
+  fingerprint?(
+    context: AdapterContext,
+    components: Readonly<Record<string, string>>,
+  ): Promise<string> | string;
+}
+
+export interface PreparedCache extends TaskCacheDefinition {
+  readonly additionalKey?: string;
+  readonly dependencyPaths?: readonly string[];
+  readonly directory?: string;
+  readonly inputFiles?: readonly string[];
+  readonly label: string;
+  readonly settings?: CacheOptions;
 }
 
 interface CacheEntry {
@@ -32,17 +49,44 @@ interface CacheEntry {
 }
 
 interface CacheProbe {
+  readonly components: Readonly<Record<string, string>>;
   readonly file: string;
   readonly hit?: AdapterOutput;
   readonly key: string;
+  readonly miss?: readonly string[];
   readonly root: string;
 }
 
-interface PreparedCache extends TaskCacheDefinition {
-  readonly additionalKey?: string;
-  readonly directory?: string;
-  readonly inputFiles?: readonly string[];
-  readonly label: string;
+interface CacheState {
+  readonly components?: Readonly<Record<string, string>>;
+  readonly inputs?: readonly string[];
+}
+
+export async function cacheProbeIsCurrent(
+  cache: PreparedCache,
+  probe: CacheProbe,
+  context: AdapterContext,
+  adapter: string,
+  options: JsonValue | undefined,
+): Promise<boolean> {
+  return (await taskKey(cache, probe.root, context, adapter, options))?.key === probe.key;
+}
+
+export function cacheStateDirectory(directory: string): string {
+  return join(dirname(directory), `.${basename(directory).replace(/^\./, '')}-state`);
+}
+
+export function cacheStatePath(
+  cache: PreparedCache,
+  context: TaskContext,
+  identity: string,
+): string | undefined {
+  return cache.directory === undefined
+    ? undefined
+    : join(
+        cacheStateDirectory(cache.directory),
+        `${digest([context.cwd, context.stageId, context.taskId, context.variant?.id, identity])}.json`,
+      );
 }
 
 export function coversOutputPath(outputs: readonly string[], path: string): boolean {
@@ -75,7 +119,10 @@ export function prepareCache(
       ) {
         invalid(path, 'invalid Windows path segment');
       }
-      if (directory !== undefined && overlaps(directory, absolute)) {
+      if (
+        directory !== undefined &&
+        [directory, cacheStateDirectory(directory)].some((path) => overlaps(path, absolute))
+      ) {
         invalid(path, 'path overlaps the cache directory');
       }
       return local;
@@ -85,7 +132,7 @@ export function prepareCache(
   return {
     ...definition,
     directory,
-    inputs: directory === undefined ? definition.inputs : paths('inputs'),
+    inputs: paths('inputs'),
     label,
     outputs: paths('outputs'),
   };
@@ -93,9 +140,11 @@ export function prepareCache(
 
 export async function probeTaskCache(
   cache: PreparedCache,
-  context: TaskContext,
+  context: AdapterContext,
   adapter: string,
   options: JsonValue | undefined,
+  previous: CacheState | undefined,
+  allowRestore = true,
 ): Promise<CacheProbe | undefined> {
   if (cache.directory === undefined) {
     return undefined;
@@ -109,17 +158,55 @@ export async function probeTaskCache(
   if (root === undefined) {
     return undefined;
   }
-  const key = await taskKey(cache, root, context, adapter, options);
-  if (key === undefined) {
+  const fingerprint = await taskKey(cache, root, context, adapter, options);
+  if (fingerprint === undefined) {
     return undefined;
   }
+  const { components, key } = fingerprint;
   const file = join(cache.directory, `${key}.json`);
-  const entry = await readEntry(file, key, context.signal);
+  const local = await readEntry(file, key, context.signal);
+  let entry = local;
+  let outputs =
+    entry === undefined ? undefined : await fingerprintOutputs(cache, root, context, entry.result);
+  const backend = cache.settings?.backend;
+  if (
+    allowRestore &&
+    backend !== undefined &&
+    (entry === undefined || outputs?.digest !== entry.outputs)
+  ) {
+    try {
+      const remote = await backend.get(key, context.signal);
+      const candidate = parseEntry(remote?.entry, key);
+      if (
+        remote !== undefined &&
+        candidate !== undefined &&
+        (await taskKey(cache, root, context, adapter, options))?.key === key
+      ) {
+        const restored = await restoreCacheOutputs(
+          root,
+          cache.outputs,
+          remote.files,
+          context.signal,
+          async (staged) =>
+            (await fingerprintOutputs(cache, staged, context, candidate.result))?.digest ===
+              candidate.outputs &&
+            (await taskKey(cache, root, context, adapter, options))?.key === key,
+        );
+        if (restored) {
+          entry = candidate;
+          outputs = await fingerprintOutputs(cache, root, context, candidate.result);
+          await writeCacheJson(file, candidate);
+        }
+      }
+    } catch (error) {
+      context.signal.throwIfAborted();
+      context.logger.info(`Cache restore failed for ${cache.label}: ${String(error)}`);
+    }
+  }
   if (entry !== undefined) {
-    const outputs = await fingerprintOutputs(cache, root, context, entry.result);
     if (
       outputs?.digest === entry.outputs &&
-      (await taskKey(cache, root, context, adapter, options)) === key
+      (await taskKey(cache, root, context, adapter, options))?.key === key
     ) {
       const hit =
         entry.result.outputs === undefined
@@ -130,10 +217,54 @@ export async function probeTaskCache(
                 .map(([path, kind]) => declaredArtifact(path, kind)),
             }
           : entry.result;
-      return { file, hit, key, root };
+      return { components, file, hit, key, root };
     }
   }
-  return { file, key, root };
+  const changes =
+    previous?.components === undefined
+      ? []
+      : [...new Set([...Object.keys(previous.components), ...Object.keys(components)])].filter(
+          (name) => previous.components?.[name] !== components[name],
+        );
+  return {
+    components,
+    file,
+    key,
+    miss: changes.length ? changes : [local === undefined ? 'no-entry' : 'outputs'],
+    root,
+  };
+}
+
+export async function readCacheState(
+  path: string | undefined,
+  signal: AbortSignal,
+): Promise<CacheState | undefined> {
+  if (path === undefined) {
+    return undefined;
+  }
+  try {
+    const state = JSON.parse(
+      await readFile(path, { encoding: 'utf8', signal }),
+    ) as CacheState | null;
+    if (
+      state === null ||
+      !Array.isArray(state.inputs) ||
+      !state.inputs.every((input) => typeof input === 'string') ||
+      (state.components !== undefined &&
+        (state.components === null ||
+          typeof state.components !== 'object' ||
+          Array.isArray(state.components) ||
+          !Object.values(state.components).every((hash) => typeof hash === 'string')))
+    ) {
+      return undefined;
+    }
+    return state;
+  } catch (error) {
+    signal.throwIfAborted();
+    if (!isFileError(error) && !(error instanceof SyntaxError)) {
+      throw error;
+    }
+  }
 }
 
 export async function reportDeclaredArtifacts(
@@ -162,31 +293,61 @@ export async function reportDeclaredArtifacts(
   return outputs.length === 0 ? output : { ...output, outputs };
 }
 
+export async function saveCacheState(path: string | undefined, state: CacheState): Promise<void> {
+  if (path !== undefined) {
+    await writeCacheJson(path, state);
+  }
+}
+
 export async function saveTaskCache(
   cache: PreparedCache,
   probe: CacheProbe,
-  context: TaskContext,
+  context: AdapterContext,
   adapter: string,
   options: JsonValue | undefined,
   result: AdapterOutput,
-): Promise<void> {
+): Promise<boolean> {
   const { signal } = context;
   const outputs = await fingerprintOutputs(cache, probe.root, context, result);
   if (
     outputs === undefined ||
-    (await taskKey(cache, probe.root, context, adapter, options)) !== probe.key
+    !(await cacheProbeIsCurrent(cache, probe, context, adapter, options))
   ) {
-    return;
+    return false;
   }
   signal.throwIfAborted();
-  const entry: CacheEntry = { key: probe.key, outputs: outputs.digest, result, schemaVersion };
-  try {
-    await writeJsonFile(probe.file, entry);
-  } catch (error) {
-    if (!isFileError(error)) {
-      throw error;
+  const entry: CacheEntry = {
+    key: probe.key,
+    outputs: outputs.digest,
+    result:
+      cache.shared && result.outputs !== undefined
+        ? {
+            ...result,
+            outputs: result.outputs.map((artifact) => ({
+              ...artifact,
+              path: relative(context.cwd, resolve(context.cwd, artifact.path)).split(sep).join('/'),
+            })),
+          }
+        : result,
+    schemaVersion,
+  };
+  await writeCacheJson(probe.file, entry);
+  const backend = cache.settings?.backend;
+  if (backend !== undefined) {
+    try {
+      const files = await snapshotCacheOutputs(probe.root, cache.outputs, signal);
+      if (
+        (await fingerprintOutputs(cache, probe.root, context, result))?.digest === entry.outputs &&
+        (await cacheProbeIsCurrent(cache, probe, context, adapter, options))
+      ) {
+        await backend.put(probe.key, { entry, files }, signal);
+      }
+    } catch (error) {
+      signal.throwIfAborted();
+      context.logger.info(`Cache upload failed for ${cache.label}: ${String(error)}`);
     }
   }
+  return true;
 }
 
 /** Detect conflicting cache boundaries in work that can run in the same stage. */
@@ -213,12 +374,46 @@ export function validateStageCaches(declarations: readonly PreparedCache[]): voi
   }
 }
 
+function canonicalOptions(options: JsonValue | undefined): JsonValue | undefined {
+  if (options === null || typeof options !== 'object') {
+    return options;
+  }
+  if (Array.isArray(options)) {
+    return options.map((value) => canonicalOptions(value)!);
+  }
+  return Object.fromEntries(
+    Object.entries(options)
+      .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+      .map(([key, value]) => [key, canonicalOptions(value)]),
+  ) as JsonValue;
+}
+
 function comparable(path: string): string {
   return process.platform === 'win32' ? path.toLowerCase() : path;
 }
 
 function declaredArtifact(path: string, kind: PathKind): Artifact {
   return { kind, path: path.split(sep).join('/') };
+}
+
+function digest(value: unknown): string {
+  return createHash('sha256').update(JSON.stringify(value)).digest('hex');
+}
+
+async function fingerprintInputFilesOrDirectories(paths: readonly string[], context: TaskContext) {
+  const entries = new Map<string, string>();
+  for (const absolute of [...new Set(paths)].sort()) {
+    const path = relative(context.cwd, absolute);
+    if (!insideWorkspace(path)) {
+      return undefined;
+    }
+    const fingerprint = await fingerprintPaths(context.cwd, [path], context.signal);
+    if (fingerprint === undefined) {
+      return undefined;
+    }
+    entries.set(path, fingerprint.digest);
+  }
+  return entries;
 }
 
 function fingerprintOutputs(
@@ -248,28 +443,25 @@ function overlaps(first: string, second: string): boolean {
   );
 }
 
+function parseEntry(value: unknown, key: string): CacheEntry | undefined {
+  const entry = value as null | Partial<CacheEntry> | undefined;
+  if (
+    entry?.schemaVersion !== schemaVersion ||
+    entry.key !== key ||
+    typeof entry.outputs !== 'string'
+  ) {
+    return undefined;
+  }
+  return { key, outputs: entry.outputs, result: normalizeOutput(entry.result), schemaVersion };
+}
+
 async function readEntry(
   file: string,
   key: string,
   signal: AbortSignal,
 ): Promise<CacheEntry | undefined> {
   try {
-    const entry = JSON.parse(
-      await readFile(file, { encoding: 'utf8', signal }),
-    ) as null | Partial<CacheEntry>;
-    if (
-      entry?.schemaVersion !== schemaVersion ||
-      entry.key !== key ||
-      typeof entry.outputs !== 'string'
-    ) {
-      return undefined;
-    }
-    return {
-      key,
-      outputs: entry.outputs,
-      result: normalizeOutput(entry.result),
-      schemaVersion,
-    };
+    return parseEntry(JSON.parse(await readFile(file, { encoding: 'utf8', signal })), key);
   } catch (error) {
     signal.throwIfAborted();
     if (isFileError(error) || error instanceof SyntaxError || error instanceof TypeError) {
@@ -282,37 +474,95 @@ async function readEntry(
 async function taskKey(
   cache: PreparedCache,
   root: string,
-  context: TaskContext,
+  context: AdapterContext,
   adapter: string,
   options: JsonValue | undefined,
-): Promise<string | undefined> {
-  const inputs = await fingerprintPaths(root, cache.inputs, context.signal);
+): Promise<{ components: Readonly<Record<string, string>>; key: string } | undefined> {
+  const pathFingerprints = new Map<string, string>();
+  const inputs = await fingerprintPaths(
+    root,
+    cache.inputs,
+    context.signal,
+    undefined,
+    pathFingerprints,
+  );
   const discovered = cache.inputFiles?.map((path) => resolve(context.cwd, path));
+  const fileFingerprints = new Map<string, string>();
   const additionalInputs =
-    discovered === undefined ? undefined : await fingerprintInputFiles(discovered, context.signal);
-  if (inputs === undefined || (discovered !== undefined && additionalInputs === undefined)) {
+    discovered === undefined
+      ? undefined
+      : await fingerprintInputFiles(
+          discovered,
+          context.signal,
+          fileFingerprints,
+          cache.shared ? context.cwd : undefined,
+        );
+  const dependencies = await fingerprintInputFilesOrDirectories(
+    cache.dependencyPaths ?? [],
+    context,
+  );
+  if (
+    inputs === undefined ||
+    dependencies === undefined ||
+    (discovered !== undefined && additionalInputs === undefined)
+  ) {
     return undefined;
   }
   const { arch, env, platform, version } = process;
-  return createHash('sha256')
-    .update(
-      JSON.stringify({
+  const values = {
+    adapter,
+    adapterVersion: cache.version,
+    additionalInputs,
+    additionalKey: cache.additionalKey,
+    cwd: cache.shared ? undefined : context.cwd,
+    environment: cache.env?.map((name) => [name, env[name] ?? null]),
+    inputs: inputs.digest,
+    options: cache.shared ? canonicalOptions(options) : options,
+    outputs: cache.outputs,
+    root: cache.shared ? undefined : root,
+    runtime: { arch, platform, version },
+    schemaVersion,
+    stageId: cache.shared ? undefined : context.stageId,
+    taskId: cache.shared ? undefined : context.taskId,
+    variant: cache.shared ? undefined : context.variant,
+  };
+  const components = Object.fromEntries([
+    [
+      'configuration',
+      digest([
         adapter,
-        adapterVersion: cache.version,
-        additionalInputs,
-        additionalKey: cache.additionalKey,
-        cwd: context.cwd,
-        environment: cache.env?.map((name) => [name, env[name] ?? null]),
-        inputs: inputs.digest,
-        options,
-        outputs: cache.outputs,
-        root,
-        runtime: { arch, platform, version },
-        schemaVersion,
-        stageId: context.stageId,
-        taskId: context.taskId,
-        variant: context.variant,
-      }),
-    )
-    .digest('hex');
+        cache.version,
+        cache.additionalKey,
+        canonicalOptions(options),
+        cache.outputs,
+      ]),
+    ],
+    ['runtime', digest(values.runtime)],
+    ...(values.environment ?? []).map(([name, value]) => [`env:${name}`, digest(value)]),
+    ...[...pathFingerprints].map(([path, hash]) => [`input:${path}`, hash]),
+    ...[...fileFingerprints].map(([path, hash]) => [`discovered:${path}`, hash]),
+    ...[...dependencies].map(([path, hash]) => [`artifact:${path}`, hash]),
+  ]);
+  const custom = await cache.settings?.fingerprint?.(context, Object.freeze({ ...components }));
+  if (custom !== undefined) {
+    components.custom = digest(custom);
+  }
+  return {
+    components,
+    key: digest({
+      ...values,
+      custom,
+      dependencies: dependencies.size ? [...dependencies] : undefined,
+    }),
+  };
+}
+
+async function writeCacheJson(file: string, value: unknown) {
+  try {
+    await writeJsonFile(file, value);
+  } catch (error) {
+    if (!isFileError(error)) {
+      throw error;
+    }
+  }
 }

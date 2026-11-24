@@ -10,11 +10,17 @@ const [, , viteUrl, reportPath, action] = process.argv;
 const request = (await json(process.stdin)) as BuildRequest;
 const vite = (await import(viteUrl)) as ViteApi;
 try {
-  const result = await withViteEnv(async () =>
-    action === 'inspect'
-      ? { inputs: await inspectVite(vite, request), version: vite.version }
-      : (await createViteSession(vite, request)).build(),
-  );
+  const result = await withViteEnv(async () => {
+    if (action === 'inspect') {
+      return { inputs: await inspectVite(vite, request), version: vite.version };
+    }
+    const session = await createViteSession(vite, request);
+    try {
+      return await session.build();
+    } finally {
+      await session.dispose();
+    }
+  });
   await writeFile(reportPath, JSON.stringify({ result }));
 } catch (error) {
   if (

@@ -3,13 +3,7 @@ import type * as Vite from 'vite';
 import { resolve } from 'node:path';
 
 import type { JsonObject } from '../core/types.js';
-import type { TaskContext } from '../executor/types.js';
-import type {
-  ViteAdapterOptions,
-  ViteEnvironmentOptions,
-  ViteOptions,
-  ViteOutput,
-} from './vite.js';
+import type { ViteEnvironmentOptions, ViteOptions, ViteOutput } from './vite.js';
 
 import {
   asArray,
@@ -88,22 +82,15 @@ export function configInputs(
   );
 }
 
-export async function configureVite(
-  config: Vite.InlineConfig,
-  extensions: ViteAdapterOptions,
-  context: TaskContext | undefined,
-  environment?: string,
-): Promise<Vite.InlineConfig> {
-  if (extensions.configure === undefined || context === undefined) {
-    return config;
-  }
-  return (await extensions.configure(config, { ...context, environment })) ?? config;
-}
-
 export async function inspectVite(vite: ViteApi, request: BuildRequest): Promise<string[]> {
   const { config, dependencies, projectFile } = await withViteEnv(() => loadProject(vite, request));
   const settings = buildSettings(vite, request);
-  const inputs = [...configCandidates(request), ...dependencies, ...configInputs(config)];
+  const inputs = [
+    ...configCandidates(request),
+    ...dependencies,
+    ...configInputs(config),
+    ...publicInputs(config),
+  ];
   for (const [name, environment] of Object.entries(settings.environmentOptions)) {
     if (Array.isArray(settings.environments) && !settings.environments.includes(name)) {
       continue;
@@ -112,7 +99,11 @@ export async function inspectVite(vite: ViteApi, request: BuildRequest): Promise
       continue;
     }
     const project = await withViteEnv(() => loadProject(vite, request, environment, projectFile));
-    inputs.push(...project.dependencies, ...configInputs(project.config));
+    inputs.push(
+      ...project.dependencies,
+      ...configInputs(project.config),
+      ...publicInputs(project.config),
+    );
   }
   return [...new Set(inputs)];
 }
@@ -122,6 +113,7 @@ export async function loadProject(
   request: BuildRequest,
   environment?: ViteEnvironmentOptions,
   projectFile?: false | string,
+  configure?: (config: Vite.InlineConfig) => Promise<Vite.InlineConfig>,
 ) {
   const { cwd, defaults, task } = request;
   const inline = vite.mergeConfig(
@@ -137,13 +129,17 @@ export async function loadProject(
       cwd,
     ),
   ) as Vite.InlineConfig;
-  const overrides: Vite.InlineConfig = {
+  const defaultsAndTask: Vite.InlineConfig = {
     ...inline,
     ...(environment?.mode === undefined ? {} : { mode: environment.mode }),
     ...(environment?.root === undefined ? {} : { root: resolve(cwd, environment.root) }),
   };
+  const overrides = (await configure?.(defaultsAndTask)) ?? defaultsAndTask;
+  if (overrides.configFile) {
+    overrides.configFile = resolve(cwd, overrides.configFile);
+  }
   const file = projectFile ?? overrides.configFile;
-  const searchRoot = viteRoot(request);
+  const searchRoot = resolve(cwd, overrides.root ?? viteRoot(request));
   const implicitNodeEnv = process.env.NODE_ENV === undefined;
   let project;
   if (file !== false) {
@@ -178,6 +174,20 @@ export async function loadProject(
     dependencies: project ? [project.path, ...project.dependencies] : [],
     projectFile: project?.path ?? (false as const),
   };
+}
+
+export function publicInputs(
+  config: Pick<Vite.InlineConfig, 'build' | 'publicDir' | 'root'>,
+): string[] {
+  if (
+    config.root === undefined ||
+    config.publicDir === false ||
+    config.publicDir === '' ||
+    config.build?.copyPublicDir === false
+  ) {
+    return [];
+  }
+  return [resolve(config.root, config.publicDir ?? 'public')];
 }
 
 export function readOptions(value: unknown, label: string): ViteOptions {
@@ -331,8 +341,16 @@ function layer(
       Object.entries(environmentOptions).map(([name, settings]) => [
         name,
         {
+          ...structuredClone(settings.config),
           build: {
-            ...structuredClone(settings.build),
+            ...vite.mergeConfig(
+              typeof settings.config?.build === 'object' &&
+                settings.config.build !== null &&
+                !Array.isArray(settings.config.build)
+                ? settings.config.build
+                : {},
+              settings.build ?? {},
+            ),
             ...(settings.outDir === undefined ? {} : { outDir: resolve(cwd, settings.outDir) }),
           },
         },
@@ -352,11 +370,14 @@ function readEnvironmentOptions(
       asNonemptyString(name, label);
       const path = `${label}.${name}`;
       const entry = asRecord(options, path);
-      checkKeys(entry, path, ['build', 'mode', 'outDir', 'root']);
+      checkKeys(entry, path, ['build', 'config', 'mode', 'outDir', 'root']);
       return [
         name,
         {
           ...(entry.build === undefined ? {} : { build: jsonObject(entry.build, `${path}.build`) }),
+          ...(entry.config === undefined
+            ? {}
+            : { config: jsonObject(entry.config, `${path}.config`) }),
           ...(entry.mode === undefined
             ? {}
             : { mode: asNonemptyString(entry.mode, `${path}.mode`) }),

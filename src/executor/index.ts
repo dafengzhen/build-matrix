@@ -1,3 +1,7 @@
+export { nativeWatchAdapter, pollingWatchAdapter } from '../adapters/watch.js';
+export { composeAdapter, retryAdapter } from './adapter.js';
+export type { ArtifactOptions } from './artifacts.js';
+export type { CacheBackend, CacheFile, CachePayload } from './cache-backend.js';
 export type { CacheOptions } from './cache.js';
 export { executePlan } from './execute.js';
 export type { ExecuteOptions } from './execute.js';
@@ -8,13 +12,20 @@ export { AdapterRegistry, createDefaultRegistry } from './registry.js';
 export type { BuiltinAdapterDefaults } from './registry.js';
 export type {
   Adapter,
+  AdapterContext,
   AdapterDefinition,
   AdapterFactory,
   AdapterLoader,
+  AdapterMiddleware,
   AdapterOutput,
+  AdapterPlugin,
   AdapterPreparation,
+  AdapterStep,
   Artifact,
+  ArtifactContext,
   HookFailure,
+  InputDiscovery,
+  InvocationAdapterFactory,
   LifecycleHooks,
   Logger,
   RunResult,
@@ -27,6 +38,7 @@ export type {
   TaskResult,
   TaskStatus,
   WatchAdapter,
+  WatchChange,
   WatchContext,
   WatchRunInfo,
 } from './types.js';

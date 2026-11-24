@@ -28,6 +28,9 @@ export function formatResult(result: RunResult, detailed?: ManifestV2): string {
       const annotation = details.length === 0 ? '' : ` [${details.join(', ')}]`;
       lines.push(`  [${task.status}] ${task.taskId}${variant}${annotation}${error}`);
       if (detailed !== undefined) {
+        if (task.cacheMiss !== undefined) {
+          lines.push(`    Cache miss — ${task.cacheMiss.join(', ')}`);
+        }
         for (const artifact of task.outputs ?? []) {
           lines.push(`    ${artifact.path}${artifact.kind ? ` (${artifact.kind})` : ''}`);
         }

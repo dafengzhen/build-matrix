@@ -1,4 +1,4 @@
-import type { InlineConfig, PluginOption } from 'vite';
+import type { EnvironmentOptions, InlineConfig, PluginOption, ResolvedConfig } from 'vite';
 
 import { createHash } from 'node:crypto';
 import { createReadStream } from 'node:fs';
@@ -9,12 +9,19 @@ import { isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 import type { JsonObject } from '../core/types.js';
-import type { Adapter, AdapterOutput, Artifact, TaskContext } from '../executor/types.js';
+import type {
+  Adapter,
+  AdapterContext,
+  AdapterOutput,
+  Artifact,
+  InputDiscovery,
+  TaskContext,
+} from '../executor/types.js';
 import type { BuildRequest, ViteApi } from './vite-config.js';
 import type { ViteBuildReport } from './vite-session.js';
 
 import { renderOptions } from '../core/template.js';
-import { asNonemptyString, invalid } from '../core/validation.js';
+import { asNonemptyString, asPositiveInteger, invalid } from '../core/validation.js';
 import { coversOutputPath } from '../executor/cache.js';
 import { fingerprintInputFiles } from '../executor/fingerprint.js';
 import { runProcess } from './process.js';
@@ -28,7 +35,17 @@ import {
 } from './vite-config.js';
 import { checkEnvironment, createViteSession, withBuildHooks } from './vite-session.js';
 
+export interface ViteAdapter extends Adapter<undefined | ViteOptions, TaskContext> {
+  dispose(): Promise<void>;
+  run(context: TaskContext, input: undefined | ViteOptions): Promise<AdapterOutput>;
+}
+
 export interface ViteAdapterOptions {
+  beforeConfig?(
+    config: InlineConfig,
+    context: ViteConfigureContext,
+  ): Awaitable<InlineConfig | void>;
+  readonly builderPool?: { readonly idleTimeoutMs?: number; readonly maxInstances?: number };
   /** Opt runtime extensions into task caching, and identify configuration changes outside Vite's files. */
   readonly cacheKey?: ((context: TaskContext) => Awaitable<string>) | string;
   collectArtifacts?(
@@ -36,12 +53,20 @@ export interface ViteAdapterOptions {
     context: TaskContext,
   ): Awaitable<readonly ViteOutput[]>;
   configure?(config: InlineConfig, context: ViteConfigureContext): Awaitable<InlineConfig | void>;
+  configureEnvironment?(
+    config: EnvironmentOptions,
+    context: { readonly environment: string } & ViteConfigureContext,
+  ): Awaitable<EnvironmentOptions | void>;
   readonly defaults?: ViteOptions;
+  readonly environmentPlugins?: Readonly<Record<string, PluginOption>>;
+  inputs?(context: TaskContext): Awaitable<readonly string[]>;
   onBuildEnd?(event: ViteBuildEnd): Awaitable<void>;
   onBuildStart?(context: TaskContext): Awaitable<void>;
   onEnvironmentEnd?(event: ViteEnvironmentEnd): Awaitable<void>;
   onEnvironmentStart?(event: ViteEnvironmentContext): Awaitable<void>;
   readonly plugins?: readonly PluginOption[];
+  resolvedConfig?(config: ResolvedConfig, context: ViteConfigureContext): Awaitable<void>;
+  transformArtifact?(output: ViteOutput, context: TaskContext): Awaitable<ViteOutput>;
   validateArtifact?(output: ViteOutput, context: TaskContext): Awaitable<void>;
 }
 
@@ -54,6 +79,8 @@ export type ViteBuildEnd = (
 export interface ViteConfigureContext extends TaskContext {
   /** Present when resolving a separate builder for an environment's root or mode. */
   readonly environment?: string;
+  onDispose(cleanup: () => Awaitable<void>): void;
+  trackInputs(paths: readonly string[], timing?: InputDiscovery): Promise<void>;
 }
 
 export interface ViteEnvironmentContext extends TaskContext {
@@ -68,6 +95,7 @@ export type ViteEnvironmentEnd = (
 
 export interface ViteEnvironmentOptions {
   readonly build?: JsonObject;
+  readonly config?: JsonObject;
   readonly mode?: string;
   readonly outDir?: string;
   readonly root?: string;
@@ -97,26 +125,42 @@ interface ReusableBuilder {
   readonly key: string;
   readonly session: Awaited<ReturnType<typeof createViteSession>>;
   readonly signature: string;
+  timer?: ReturnType<typeof setTimeout>;
 }
 
 const packageRequire = createRequire(import.meta.url);
 const buildScript = fileURLToPath(import.meta.resolve('#vite-build'));
 let inProcessQueue = Promise.resolve();
 
-export function createViteAdapter(
-  extensions: ViteAdapterOptions = {},
-): Adapter<undefined | ViteOptions> {
+export function createViteAdapter(extensions: ViteAdapterOptions = {}): ViteAdapter {
   const defaultOptions = readOptions(extensions.defaults, 'vite adapter defaults');
+  const maxInstances = asPositiveInteger(
+    extensions.builderPool?.maxInstances ?? 8,
+    'vite builderPool.maxInstances',
+  );
+  const idleTimeout = extensions.builderPool?.idleTimeoutMs;
+  if (
+    idleTimeout !== undefined &&
+    (!Number.isSafeInteger(idleTimeout) || idleTimeout < 1 || idleTimeout > 2_147_483_647)
+  ) {
+    invalid('vite builderPool.idleTimeoutMs', 'expected a positive integer within the timer limit');
+  }
   const usesExtensions =
     [
+      extensions.beforeConfig,
       extensions.configure,
+      extensions.configureEnvironment,
       extensions.onBuildStart,
       extensions.onBuildEnd,
       extensions.onEnvironmentStart,
       extensions.onEnvironmentEnd,
       extensions.collectArtifacts,
+      extensions.resolvedConfig,
+      extensions.transformArtifact,
       extensions.validateArtifact,
-    ].some((callback) => callback !== undefined) || Boolean(extensions.plugins?.length);
+    ].some((callback) => callback !== undefined) ||
+    Boolean(extensions.plugins?.length) ||
+    Object.keys(extensions.environmentPlugins ?? {}).length > 0;
   const builders = new Map<string, ReusableBuilder>();
 
   function taskRequest(context: TaskContext, input: undefined | ViteOptions): BuildRequest {
@@ -154,7 +198,32 @@ export function createViteAdapter(
       entry?.key === builderKey &&
       (await fingerprintInputFiles(entry.session.dependencies, context.signal)) === entry.signature
     ) {
-      return entry.session;
+      return entry;
+    }
+  }
+
+  async function evict(slot: string) {
+    const entry = builders.get(slot);
+    if (entry !== undefined) {
+      builders.delete(slot);
+      clearTimeout(entry.timer);
+      await entry.session.dispose();
+    }
+  }
+
+  function touch(context: TaskContext, slot: string, entry: ReusableBuilder) {
+    clearTimeout(entry.timer);
+    builders.delete(slot);
+    builders.set(slot, entry);
+    if (idleTimeout !== undefined) {
+      const timer = setTimeout(() => {
+        void inProcess(new AbortController().signal, async () => {
+          if (builders.get(slot) === entry && entry.timer === timer) {
+            await evict(slot);
+          }
+        }).catch((error) => context.logger.error(`Vite builder disposal failed: ${String(error)}`));
+      }, idleTimeout).unref();
+      entry.timer = timer;
     }
   }
 
@@ -165,9 +234,17 @@ export function createViteAdapter(
     knownInputs?: readonly string[],
   ) {
     const options = { ...request.defaults, ...request.task };
+    const artifacts = (context as Partial<AdapterContext>).artifacts;
+    for (const path of [
+      ...(options.outputs ?? []).map(({ path }) => path),
+      ...(options.outDir === undefined ? [] : [options.outDir]),
+    ]) {
+      await artifacts?.reserve(path);
+    }
     const viteUrl = pathToFileURL(resolveVite(viteRoot(request), context.cwd)).href;
     if (options.execution !== 'in-process') {
       const report = await runChild<ViteBuildReport>(context, request, viteUrl, 'build');
+      await context.trackInputs?.(report.inputs, { late: true });
       return { outputs: await reportArtifacts(context, report, options) };
     }
     return withBuildHooks(
@@ -178,35 +255,52 @@ export function createViteAdapter(
           const vite = await importVite(viteUrl);
           if (options.builder !== 'reuse') {
             const session = await createViteSession(vite, request, extensions, context);
-            await context.trackInputs?.(session.dependencies);
-            return session.build(context);
+            try {
+              await context.trackInputs?.(session.preparedInputs);
+              return await session.build(context);
+            } finally {
+              await session.dispose();
+            }
           }
           const slot = builderSlot(context);
           const builderKey = builderIdentity(request, viteUrl, key);
+          let temporary: Awaited<ReturnType<typeof createViteSession>> | undefined;
           try {
-            let session = await findReusable(context, slot, builderKey);
-            if (session === undefined) {
+            let entry = await findReusable(context, slot, builderKey);
+            if (entry === undefined) {
               const tracked =
                 knownInputs ??
                 builders.get(slot)?.session.dependencies ??
                 configCandidates(request);
-              builders.delete(slot);
+              await evict(slot);
+              while (builders.size >= maxInstances) {
+                await evict(builders.keys().next().value!);
+              }
               const before = await fingerprintInputFiles(tracked, context.signal);
-              session = await createViteSession(vite, request, extensions, context);
-              const signature = await fingerprintInputFiles(session.dependencies, context.signal);
+              temporary = await createViteSession(vite, request, extensions, context);
+              const signature = await fingerprintInputFiles(temporary.dependencies, context.signal);
               if (
                 signature !== undefined &&
                 before !== undefined &&
                 (await fingerprintInputFiles(tracked, context.signal)) === before
               ) {
-                builders.set(slot, { key: builderKey, session, signature });
+                entry = { key: builderKey, session: temporary, signature };
+                builders.set(slot, entry);
+                temporary = undefined;
               }
             }
-            await context.trackInputs?.(session.dependencies);
-            return await session.build(context);
+            const session = entry?.session ?? temporary!;
+            await context.trackInputs?.(session.preparedInputs);
+            const report = await session.build(context);
+            if (entry !== undefined) {
+              touch(context, slot, entry);
+            }
+            return report;
           } catch (error) {
-            builders.delete(slot);
+            await evict(slot);
             throw error;
+          } finally {
+            await temporary?.dispose();
           }
         });
         return { outputs: await reportArtifacts(context, report, options, extensions) };
@@ -215,9 +309,30 @@ export function createViteAdapter(
   }
 
   return {
+    dispose() {
+      return inProcess(new AbortController().signal, async () => {
+        const results = await Promise.allSettled([...builders.keys()].map(evict));
+        const errors = results.flatMap((result) =>
+          result.status === 'rejected' ? [result.reason] : [],
+        );
+        if (errors.length) {
+          throw new AggregateError(errors, 'Vite builder disposal failed');
+        }
+      });
+    },
     async prepare(context, input) {
       const request = taskRequest(context, input);
       const key = await runtimeKey(context);
+      const pluginInputs = (await extensions.inputs?.(context)) ?? [];
+      await context.trackInputs?.(pluginInputs);
+      if (
+        'cacheEnabled' in context &&
+        'watching' in context &&
+        !context.cacheEnabled &&
+        !context.watching
+      ) {
+        return { run: () => run(context, request, key) };
+      }
       await context.trackInputs?.(configCandidates(request));
       const viteUrl = pathToFileURL(resolveVite(viteRoot(request), context.cwd)).href;
       const { builder, execution } = { ...request.defaults, ...request.task };
@@ -234,7 +349,7 @@ export function createViteAdapter(
                     )
                   : undefined;
               return {
-                inputs: existing?.dependencies ?? (await inspectVite(vite, request)),
+                inputs: existing?.session.preparedInputs ?? (await inspectVite(vite, request)),
                 version: vite.version,
               };
             })
@@ -255,11 +370,12 @@ export function createViteAdapter(
                 process.env.NODE_ENV,
                 key,
               ]),
-        inputs: report.inputs,
+        inputs: [...report.inputs, ...pluginInputs],
         run: () => run(context, request, key, report.inputs),
       };
     },
     async run(context, input) {
+      await context.trackInputs?.((await extensions.inputs?.(context)) ?? []);
       return run(context, taskRequest(context, input), await runtimeKey(context));
     },
   };
@@ -269,8 +385,10 @@ function builderIdentity(request: BuildRequest, viteUrl: string, key: string | u
   return JSON.stringify([request, viteUrl, key, process.env.NODE_ENV]);
 }
 
-function builderSlot({ cwd, stageId, taskId, variant }: TaskContext): string {
-  return JSON.stringify([cwd, stageId, taskId, variant?.id]);
+function builderSlot(context: TaskContext): string {
+  const { cwd, stageId, taskId, variant } = context;
+  const { environment, stepPath } = context as Partial<AdapterContext>;
+  return JSON.stringify([cwd, stageId, taskId, variant?.id, environment, stepPath]);
 }
 
 async function importVite(url: string): Promise<ViteApi> {
@@ -340,8 +458,15 @@ async function reportArtifacts(
           'vite collected outputs',
         );
   const outputs: ViteOutput[] = [];
-  for (const candidate of customized) {
+  for (const input of customized) {
     signal.throwIfAborted();
+    const candidate =
+      extensions.transformArtifact === undefined
+        ? input
+        : readOutputs(
+            [await extensions.transformArtifact(input, context)],
+            'vite transformed output',
+          )[0];
     if (candidate.environment !== undefined) {
       checkEnvironment(candidate.environment, report.available, 'vite collected outputs');
       if (!built.has(candidate.environment)) {
@@ -350,7 +475,10 @@ async function reportArtifacts(
     }
     const output = await verifyArtifact(context, candidate, {
       detailed: options.artifacts === 'files',
-      required: declared !== undefined || extensions.collectArtifacts !== undefined,
+      required:
+        declared !== undefined ||
+        extensions.collectArtifacts !== undefined ||
+        extensions.transformArtifact !== undefined,
     });
     if (output !== undefined) {
       await extensions.validateArtifact?.(output, context);

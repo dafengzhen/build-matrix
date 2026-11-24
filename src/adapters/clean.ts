@@ -1,7 +1,7 @@
 import { lstat, realpath, rm } from 'node:fs/promises';
 import { isAbsolute, parse, relative, resolve, sep } from 'node:path';
 
-import type { Adapter } from '../executor/types.js';
+import type { Adapter, TaskContext } from '../executor/types.js';
 
 import { asPath, asRecord, checkKeys, invalid } from '../core/validation.js';
 
@@ -9,7 +9,7 @@ export type CleanOptions = {
   readonly path: string;
 };
 
-export function createCleanAdapter(): Adapter<CleanOptions> {
+export function createCleanAdapter() {
   return {
     async run(context, input) {
       const options = asRecord(input, 'clean options');
@@ -52,7 +52,7 @@ export function createCleanAdapter(): Adapter<CleanOptions> {
       await rm(target, { force: true, recursive: true });
       return { metadata: { removed: true } };
     },
-  };
+  } satisfies Adapter<CleanOptions, TaskContext>;
 }
 
 function isDescendant(parent: string, child: string): boolean {

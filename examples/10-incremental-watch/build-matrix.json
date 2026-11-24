@@ -1,0 +1,25 @@
+{
+  "matrix": {
+    "dimensions": { "target": ["web", "worker"] },
+    "idTemplate": "{target}"
+  },
+  "pipeline": {
+    "stages": [
+      {
+        "id": "build",
+        "tasks": [
+          {
+            "id": "emit",
+            "adapter": "shell",
+            "options": { "command": "node", "args": ["build.ts", "{target}"] },
+            "cache": {
+              "version": "example@1;node",
+              "inputs": ["build.ts", "src/header.txt", "src/{target}.txt"],
+              "outputs": ["dist/{target}.txt"]
+            }
+          }
+        ]
+      }
+    ]
+  }
+}

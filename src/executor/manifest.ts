@@ -104,7 +104,13 @@ export function createDetailedReport(plan: Plan, result: RunResult): ManifestV2 
     })),
     ...(watch === undefined
       ? {}
-      : { watch: { changedPaths: [...watch.changedPaths], number: watch.number } }),
+      : {
+          watch: {
+            changedPaths: [...watch.changedPaths],
+            ...(watch.changes === undefined ? {} : { changes: [...watch.changes] }),
+            number: watch.number,
+          },
+        }),
   };
 }
 
@@ -181,6 +187,7 @@ function manifestError({ code, message, name, stack }: TaskError): TaskError {
 function manifestTask(task: TaskResult, detailed = false): TaskResult {
   const {
     adapter,
+    cacheMiss,
     durationMs,
     error,
     finishedAt,
@@ -219,6 +226,7 @@ function manifestTask(task: TaskResult, detailed = false): TaskResult {
         }),
     ...(metadata === undefined ? {} : { metadata }),
     ...(error === undefined ? {} : { error: manifestError(error) }),
+    ...(detailed && cacheMiss !== undefined ? { cacheMiss: [...cacheMiss] } : {}),
     ...(detailed && resourceGroup !== undefined ? { resourceGroup } : {}),
   };
 }

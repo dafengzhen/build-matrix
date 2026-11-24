@@ -9,7 +9,7 @@
 - 默认 ID 按维度声明顺序生成，例如 `runtime=node,format=esm`。可用 `idTemplate` 自定义非空且唯一的 ID。任务选项中的字符串支持 `{dimension}` 替换和 `{{dimension}}` 字面转义，包括嵌套数组和对象中的字符串。
 - 阶段按声明顺序执行。阶段 ID 和任务 ID 各自在整个流水线中唯一。任务默认对每个变体执行一次。`scope: "global"` 的任务即使在矩阵没有变体时也会在所属阶段执行一次，且没有维度上下文。
 - 默认一次执行一个任务。可用 `--max-concurrency` 或 API 的 `maxConcurrency` 提高阶段内的并发上限。用 `pipeline.resourceLimits` 和任务的 `resourceGroup` 约束组内并发。可用 `--resource cpu=2` 或 API 的 `resourceLimits` 覆盖组上限。报告保持阶段、任务和变体的声明顺序。
-- 任务失败后跳过后续阶段。默认策略 `fail-fast` 停止启动当前阶段的剩余任务，并等待已启动的任务结束。设置 `failurePolicy: "continue"` 可跑完当前阶段。取消时保留已完成的结果，并向正在运行的适配器传递取消信号。
+- 默认策略 `fail-fast` 停止启动当前阶段的剩余任务，并等待已启动的任务结束。`failurePolicy: "continue"` 会跑完当前阶段。`failurePolicy: "continue-pipeline"` 也会继续执行后续阶段，其中依赖失败任务产物的调用会以 `ARTIFACT_DEPENDENCY_UNAVAILABLE` 失败。取消时保留已完成的结果，并向正在运行的适配器传递取消信号。
 
 ## 适配器
 
@@ -83,9 +83,11 @@ const registry = createDefaultRegistry(
 
 用 `outputs` 声明构建后要报告和校验的产物。每项支持 `path`、`kind`、`environment`、`sizeBytes` 和 `sha256`。路径可为绝对路径或相对于任务工作目录，指定 Environment 的条目在对应 Environment 构建时生效。编程式 `collectArtifacts(outputs, context)` 回调可替换或追加产物，`validateArtifact(output, context)` 可通过抛错执行额外校验。显式声明或自定义收集的产物必须存在、符合预期，并在任务声明 `cache.outputs` 时被其覆盖。
 
-任务缓存和默认轮询 Watch 自动跟踪 Vite 配置文件、Vite 配置加载器报告的依赖和对应 mode 的 env 文件。源文件仍由 `cache.inputs` 和 Watch 路径指定，项目代码直接读取的其他输入也可以加入这些声明。使用 JavaScript 扩展时默认跳过任务缓存，可以通过 `cacheKey` 字符串或回调启用缓存，并在相关扩展输入变化时更新键值。
+任务缓存和 Watch 跟踪 Vite 的配置依赖、mode 环境文件、构建模块及插件通过 `this.addWatchFile(path)` 声明的文件。用 `inputs(context)` 或 `cache.inputs` 提前声明插件直接读取的文件，可在首次构建前建立指纹。构建结束后才发现的输入会记录下来，供下次执行校验。使用实时插件或配置回调时，提供 `cacheKey` 可启用缓存。
 
-`builder: "once"` 每次构建创建一个 Builder。`execution: "in-process"` 搭配 `builder: "reuse"` 时，同一 registry 下的任务和变体可复用 Builder。源文件变化时用同一 Builder 重新构建。配置依赖、构建选项或 `cacheKey` 变化，以及 Vite 构建失败，都会使 Builder 失效。构建仍由 Build Matrix 的 Watch 调度，沿用防抖和取消机制。
+`beforeConfig` 在加载项目配置前运行，`configure` 接收合并后的配置，`configureEnvironment` 接收各 Environment 的配置，`resolvedConfig` 接收最终配置。使用 `environmentOptions.<name>.config` 提供 JSON 覆盖，或用 `environmentPlugins` 为指定 Environment 注册构建插件。通过 Environment 的 `build.rolldownOptions.output` 自定义 bundle 的文件名，用 `outDir` 设置输出目录。生成后可用 `transformArtifact(output, context)` 转换文件或返回另一路径，转换结果会参与产物校验。
+
+`builder: "once"` 为每次构建创建 Builder 并在结束时释放资源。`execution: "in-process"` 配合 `builder: "reuse"` 可复用 Builder，配置依赖、选项或 `cacheKey` 变化以及构建失败会淘汰原实例。用 `builderPool.maxInstances` 配置容量（默认 8），用 `builderPool.idleTimeoutMs` 启用空闲淘汰。配置钩子可用 `context.onDispose(cleanup)` 注册资源清理。自建 registry 用完后调用 `await registry.dispose()`，直接使用 Vite Adapter 时也可调用其 `dispose()`。
 
 ## 过滤和报告
 
@@ -104,6 +106,8 @@ const registry = createDefaultRegistry(
 `--watch <path>` 会先执行一次，随后在监听的文件变化时重跑。可以重复传参来监听多个路径，目录会递归扫描。用 `--watch-ignore <path>` 排除生成文件。默认每 150 毫秒扫描一次，变更静默 200 毫秒后开始重跑，可通过 `--poll-interval` 和 `--debounce` 调整。运行期间的新变更会合并到下一轮，任务失败后继续监听。按 Ctrl+C 停止。
 
 监听模式下，`--json` 每轮输出一行 JSON，`--manifest` 原子更新最近一轮报告。报告文件和正在使用的缓存目录会自动排除。
+
+`--watch-incremental` 使用已知输入和产物依赖选择重跑的任务与步骤。`--watch-strategy native` 使用文件系统事件触发扫描，定期扫描用于补充事件覆盖。两种模式在详细报告里都支持 `watch.changes`，区分 `added`、`modified`、`deleted`，并按可识别的文件身份合并 `renamed`。增量模式可以省略 `--watch`，直接监听已声明和已发现的路径。缺少输入信息的任务会保守重跑。
 
 ## JavaScript 和 TypeScript API
 
@@ -146,6 +150,52 @@ console.log(result.counts);
 `watchPlan(plan, { paths, signal, onRun })` 提供监听模式，并在每轮报告写入后调用 `onRun`。`executePlan` 和 `watchPlan` 都接受运行、阶段和任务的异步开始与结束钩子。任务钩子覆盖已调度的调用，包括缓存命中。钩子错误记录在 `result.hookErrors` 和版本 2 的报告中。
 
 为 `watchPlan` 传入 `watchAdapter` 可替换变更来源。适配器的 `watch(context)` 接收绝对路径 `paths`、用于判断是否排除路径的 `ignore(path)` 和取消信号 `signal`。首轮调用并等待 `context.run([])`，后续每批变更调用并等待 `context.run(changedPaths)`，传入相对于 `context.cwd` 的路径。
+
+## 组合构建与产物依赖
+
+从 `@dafengzhen/build-matrix/executor` 导入 `composeAdapter`。传入步骤数组或 `(context, options) => steps` 工厂。普通 Adapter 也可以在 `prepare` 中返回 `{ steps }`。每个步骤提供唯一的 `id`，指定已注册的 Adapter ID、行内 Adapter 或 `run(context)`。用 `dependsOn` 声明同组前置步骤，执行器会验证依赖并按顺序运行。步骤可独立声明 `inputs`、`cache` 和 `environment`。
+
+```js
+import { writeFile } from 'node:fs/promises';
+import {
+  composeAdapter,
+  createDefaultRegistry,
+  retryAdapter,
+} from '@dafengzhen/build-matrix/executor';
+
+const registry = createDefaultRegistry()
+  .use(retryAdapter(2))
+  .register('build-and-index', {
+    factory: () =>
+      composeAdapter([
+        {
+          adapter: 'vite',
+          cache: { inputs: ['src', 'index.html'], outputs: ['dist/site'], version: '1' },
+          id: 'site',
+          options: { outDir: 'dist/site' },
+        },
+        {
+          cache: { inputs: [], outputs: ['dist/artifacts.json'], version: '1' },
+          dependsOn: ['site'],
+          id: 'index',
+          async run({ artifacts }) {
+            const path = await artifacts.stage({ kind: 'file', path: 'dist/artifacts.json' });
+            await writeFile(path, JSON.stringify(artifacts.get('site')));
+            return {};
+          },
+        },
+      ]),
+    prepare: true,
+  });
+```
+
+- `AdapterContext` 在任务内用 `taskData` 共享数据，在同轮运行内用 `runData` 共享数据，并提供日志、取消信号、步骤路径和产物 API。设置 `scope: "invocation"` 时，工厂收到带 Task、Variant 和 Environment 的上下文，实例在调用结束后释放。任务字段 `environment` 支持变体模板。
+- `registry.use(middleware)` 注册围绕实际运行的中间件，可用 `next()` 实现前后处理、错误恢复或重试。也可传入包含 `setup(registry)` 和 `middleware` 的插件。用 `onAdapterStart` 和 `onAdapterFinish` 观察每个实际调度的 Adapter 和步骤，包括缓存命中。
+- 在读取动态文件前调用并等待 `context.trackInputs(paths)`。如果文件已被读取，传入 `{ late: true }`，让执行器在后续构建建立可靠指纹。注册带 `prepare` 的缓存 Adapter 时使用 `prepare: true`，以便缓存查找前重新发现输入。组合 Adapter 可用独立步骤缓存构建、转换和打包等阶段。
+- 详细报告的 `cacheMiss` 及 `onAdapterFinish` 会列出上次记录后发生变化的输入、配置、环境变量或产物。用 `cache.fingerprint(context, components)` 补充自定义指纹。相同输出布局的可移植任务可设 `cache.shared: true`，以便跨任务或工作目录复用。通过 `CacheBackend.get/put` 可接入远程存储，恢复时先校验内容再发布。动态输入和诊断索引默认存放在旁边的 `.build-matrix-cache-state`。
+- 任务用 `consumes: ["上游任务 ID"]` 依赖更早阶段的产物，并通过 `artifacts.get(id)` 查询。筛选消费者时自动加入上游调用。变体任务消费同变体或全局产物，全局任务可消费所有变体产物。依赖产物内容参与下游缓存指纹。
+- 用 `artifacts.register(artifact)` 登记直接生成的产物，用 `artifacts.reserve(path)` 在直接写入前声明独占路径，用 `artifacts.validate(artifact)` 校验文件。用 `artifacts.stage(artifact)` 写入临时位置，执行器校验后按执行单元提交，遇到安装错误会尝试恢复原输出。全局 `artifacts.transform` 和 `artifacts.validate` 钩子会在新构建时运行，暂存产物会额外传入临时源路径。
+- 在 `executePlan` 或 `watchPlan` 同时设置 `manifestPath` 和 `artifacts.cleanup: ['dist']`，可在一次成功的完整范围运行后清理上一份成功 Manifest 中已失效的产物。清理受指定目录限制。对目录产物，Manifest 记录的是整棵目录的所有权。
 
 ## 常见问题
 

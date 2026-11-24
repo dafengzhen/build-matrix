@@ -19,6 +19,7 @@ coverage
 # Caches
 .vite/
 .build-matrix-cache/
+.build-matrix-cache-state/
 .eslintcache
 .oxlintcache
 

@@ -7,7 +7,7 @@ export type DimensionValue = boolean | number | string;
 
 export type DimensionValues = Readonly<Record<string, DimensionValue>>;
 
-export type FailurePolicy = 'continue' | 'fail-fast';
+export type FailurePolicy = 'continue-pipeline' | 'continue' | 'fail-fast';
 
 export type JsonObject = { readonly [key: string]: JsonValue };
 export type JsonValue = boolean | JsonObject | null | number | readonly JsonValue[] | string;
@@ -50,6 +50,8 @@ export interface TaskCacheDefinition {
   readonly inputs: readonly string[];
   /** Paths fingerprinted for cache reuse and reported when the adapter omits its output list. */
   readonly outputs: readonly string[];
+  /** Share matching entries across invocations and workspaces. */
+  readonly shared?: boolean;
   /** Version fingerprint of the adapter and tools used by this task. */
   readonly version: string;
 }
@@ -57,6 +59,9 @@ export interface TaskCacheDefinition {
 export interface TaskDefinition<Options extends JsonValue = JsonValue> {
   readonly adapter: string;
   readonly cache?: TaskCacheDefinition;
+  /** Task IDs from earlier stages whose artifacts are required by this task. */
+  readonly consumes?: readonly string[];
+  readonly environment?: string;
   readonly id: string;
   readonly options?: Options;
   readonly resourceGroup?: string;

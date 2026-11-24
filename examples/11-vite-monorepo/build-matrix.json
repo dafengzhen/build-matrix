@@ -1,0 +1,25 @@
+{
+  "matrix": {
+    "dimensions": { "app": ["storefront", "admin"] },
+    "idTemplate": "{app}"
+  },
+  "pipeline": {
+    "stages": [
+      {
+        "id": "build",
+        "tasks": [
+          {
+            "id": "bundle",
+            "adapter": "vite",
+            "options": {
+              "root": "apps/{app}",
+              "outDir": "dist/{app}",
+              "artifacts": "files",
+              "viteConfig": { "build": { "emptyOutDir": true } }
+            }
+          }
+        ]
+      }
+    ]
+  }
+}

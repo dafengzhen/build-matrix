@@ -21,6 +21,8 @@ const help = `Usage: build-matrix [config.json] [options]
   --no-cache                  Bypass the local task cache
   --watch <path>              Watch a source file or directory recursively (repeatable)
   --watch-ignore <path>       Exclude a file or directory from watch (repeatable)
+  --watch-incremental         Rebuild tasks and steps affected by changed inputs
+  --watch-strategy <name>     Watch strategy (polling or native)
   --debounce <ms>             Watch quiet period (default: 200)
   --poll-interval <ms>        Watch scan interval (default: 150)
   -h, --help                  Show usage
@@ -54,13 +56,19 @@ export async function runCli(argv: readonly string[] = process.argv.slice(2)): P
     const maxConcurrency = parseNumber(values['max-concurrency'], 'max-concurrency');
     const debounceMs = parseNumber(values.debounce, 'debounce');
     const pollIntervalMs = parseNumber(values['poll-interval'], 'poll-interval');
+    const strategy = values['watch-strategy'];
+    if (strategy !== undefined && strategy !== 'native' && strategy !== 'polling') {
+      throw new ConfigurationError('watch-strategy must be polling or native');
+    }
     if (
       values.watch === undefined &&
+      !values['watch-incremental'] &&
       (values['watch-ignore'] !== undefined ||
         debounceMs !== undefined ||
-        pollIntervalMs !== undefined)
+        pollIntervalMs !== undefined ||
+        strategy !== undefined)
     ) {
-      throw new ConfigurationError('watch-ignore, debounce and poll-interval require --watch');
+      throw new ConfigurationError('watch options require --watch or --watch-incremental');
     }
     const resourceLimits = Object.fromEntries(
       (values.resource ?? []).map((entry) => {
@@ -103,14 +111,17 @@ export async function runCli(argv: readonly string[] = process.argv.slice(2)): P
         : formatResult(result, detailed);
       process.stdout.write(`${output}\n`);
     };
-    if (values.watch !== undefined) {
+    if (values.watch !== undefined || values['watch-incremental']) {
       await watchPlan(plan, {
         ...settings,
+        classifyChanges: values['watch-incremental'] || strategy === 'native',
         debounceMs,
         ignore: values['watch-ignore'],
+        incremental: values['watch-incremental'],
         onRun: printRun,
-        paths: values.watch,
+        paths: values.watch ?? [],
         pollIntervalMs,
+        strategy,
       });
       return cancellationExitCode;
     }
@@ -175,6 +186,8 @@ function parseCliArgs(argv: readonly string[]) {
         variant: { multiple: true, type: 'string' },
         watch: { multiple: true, type: 'string' },
         'watch-ignore': { multiple: true, type: 'string' },
+        'watch-incremental': { type: 'boolean' },
+        'watch-strategy': { type: 'string' },
       },
     });
   } catch (error) {

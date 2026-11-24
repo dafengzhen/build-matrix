@@ -1,6 +1,6 @@
 {
   "name": "@dafengzhen/build-matrix",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "description": "Run configurable build matrices and staged pipelines with task adapters, local caching, and file watching.",
   "keywords": [
     "build-matrix",
@@ -83,8 +83,8 @@
     "@types/node": "^26.6.6",
     "@vitest/coverage-v8": "^5.1.1",
     "eslint-plugin-perfectionist": "^5.14.0",
-    "oxfmt": "^0.79.0",
-    "oxlint": "^1.94.0",
+    "oxfmt": "^0.80.0",
+    "oxlint": "^1.95.0",
     "publint": "^0.3.25",
     "typescript": "~7.0.2",
     "vite": "^8.3.8",

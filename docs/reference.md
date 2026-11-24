@@ -9,7 +9,7 @@
 - Default IDs follow the dimension order, for example `runtime=node,format=esm`. Set `idTemplate` for custom IDs. IDs must be nonempty and unique. Strings in task options, including nested arrays and objects, support `{dimension}` substitution and `{{dimension}}` for a literal placeholder.
 - Stages run in declaration order. Stage IDs and task IDs are each unique across the pipeline. A task runs once per variant by default. A task with `scope: "global"` runs once in its stage, even with zero variants, and has no dimension context.
 - The default concurrency is one task at a time. Set `--max-concurrency` or API option `maxConcurrency` to run tasks in parallel within a stage. Use `pipeline.resourceLimits` and task `resourceGroup` for per-group limits. Override those limits with `--resource cpu=2` or API option `resourceLimits`. Reports keep stage, task, and variant declaration order.
-- A failed task stops later stages. Within the current stage, `fail-fast` stops starting tasks and waits for work already running. Use `failurePolicy: "continue"` to finish the current stage. Cancellation preserves completed results and passes an abort signal to running adapters.
+- The default `fail-fast` policy stops starting tasks and waits for work already running. Use `failurePolicy: "continue"` to finish the current stage, or `"continue-pipeline"` to run later stages as well. Consumers of failed tasks report `ARTIFACT_DEPENDENCY_UNAVAILABLE`. Cancellation preserves completed results and passes an abort signal to running adapters.
 
 ## Adapters
 
@@ -83,9 +83,11 @@ The default `artifacts: "directories"` reports Vite's output locations. Use `art
 
 Set `outputs` to declare the paths to report and verify after building. Entries accept `path`, `kind`, `environment`, `sizeBytes`, and `sha256`. Paths can be absolute or relative to the task working directory. An environment-specific declaration applies when that environment builds. The programmatic `collectArtifacts(outputs, context)` callback can replace or add candidates. `validateArtifact(output, context)` can apply additional checks by throwing an error. Declared or custom paths must exist, match their expectations, and be covered by `cache.outputs` if the task declares it.
 
-The task cache and default polling watcher track the Vite config and the dependencies reported by Vite's config loader, along with the mode's env files. Continue to declare source files in `cache.inputs` and watch paths. Put additional inputs that project code reads directly in these declarations. JavaScript extensions bypass the task cache by default. Supply a string or callback as `cacheKey` to opt in, and change its value when relevant extension inputs change.
+The task cache and watcher track Vite configuration dependencies, env files, build modules, and files declared by plugins through `this.addWatchFile(path)`. Use `inputs(context)` or `cache.inputs` to fingerprint plugin inputs before the first build. Dependencies found after a build are available for subsequent cache lookups. Supply a `cacheKey` to opt runtime plugins and configuration callbacks into caching.
 
-`builder: "once"` creates a new builder for each build. With `execution: "in-process"` and `builder: "reuse"`, the adapter retains a builder per task and variant for use across repeated calls with the same registry. Source edits trigger a fresh build with the same builder. Configuration dependency changes, option changes, a changed `cacheKey`, or a failed Vite build discard the builder. Build Matrix's watcher schedules these builds using its usual debounce and cancellation behavior.
+`beforeConfig` runs before project config loading, `configure` receives the merged config, `configureEnvironment` receives individual environment settings, and `resolvedConfig` receives the final config. Use `environmentOptions.<name>.config` for JSON overrides and `environmentPlugins` for environment-specific build plugins. Customize filenames through an environment's `build.rolldownOptions.output` and its output directory through `outDir`. Use `transformArtifact(output, context)` to process outputs or report their new paths before validation.
+
+`builder: "once"` creates and releases a builder per build. With `execution: "in-process"` and `builder: "reuse"`, later builds can reuse builders from the same registry. Changes to configuration dependencies, options, or `cacheKey`, and Vite build failures evict the builder. `builderPool.maxInstances` sets the LRU capacity (default 8), and `builderPool.idleTimeoutMs` enables idle eviction. Use `context.onDispose(cleanup)` in config hooks to register cleanup. Call `await registry.dispose()` when finished with a caller-owned registry, or `dispose()` on a directly managed Vite adapter.
 
 ## Filters and reports
 
@@ -104,6 +106,8 @@ When an adapter omits `outputs`, the report lists existing files and directories
 `--watch <path>` runs the pipeline once and reruns it when a watched file changes. Repeat the flag to watch several paths. Directories are scanned recursively. Use `--watch-ignore <path>` to exclude generated files. Scans run every 150 ms by default, with a 200 ms quiet period before rebuilding. Override these defaults with `--poll-interval` and `--debounce`. Changes during a run queue for the next run, and task failures leave the watcher running. Press Ctrl+C to stop.
 
 In watch mode, `--json` emits one JSON object per run and `--manifest` atomically replaces the latest report. The manifest and active cache directory are excluded from watching.
+
+Use `--watch-incremental` to rebuild affected tasks and steps based on known inputs and artifact dependencies. It can watch declared and discovered dependencies without an explicit `--watch` path. Tasks without complete dependency information rerun conservatively. Use `--watch-strategy native` to trigger scans from filesystem events, with periodic scans for fallback. Both flags enable change classifications in detailed reports. `watch.changes` distinguishes `added`, `modified`, `deleted`, and detectable `renamed` events.
 
 ## JavaScript and TypeScript API
 
@@ -146,6 +150,17 @@ Use `createManifest(plan, result)` for schema 1 and `createDetailedReport(plan, 
 `watchPlan(plan, { paths, signal, onRun })` provides watch mode and calls `onRun` after persisting the manifest for that run. Both `executePlan` and `watchPlan` accept asynchronous run, stage, and task start and finish hooks. Task hooks cover scheduled invocations, including cache hits. Hook errors appear in `result.hookErrors` and schema 2 reports.
 
 Supply `watchAdapter` to `watchPlan` to use a different change source. Its `watch(context)` method receives absolute `paths`, an `ignore(path)` predicate, and an abort `signal`. Call and await `context.run([])` for the initial run and `context.run(changedPaths)` for each subsequent batch, with paths relative to `context.cwd`.
+
+## Composition and artifact dependencies
+
+- Import `composeAdapter` from `@dafengzhen/build-matrix/executor`. Pass a step array or a factory `(context, options) => steps`. A regular adapter can return the same `{ steps }` from `prepare`. Each step has an `id` and a registered adapter ID, inline adapter, or `run(context)` callback. Use `dependsOn` for sibling dependencies and `inputs`, `cache`, and `environment` to configure each step independently.
+- `AdapterContext` includes `taskData` shared by a task and its steps, `runData` shared by the run, and the logger, abort signal, step path, and artifacts. Use `scope: "invocation"` to create an adapter with its Task, Variant, and Environment and dispose it after the invocation. The task's `environment` can use dimension templates.
+- Register middleware with `registry.use(middleware)` to wrap execution with `next()`. Use `retryAdapter(attempts)` for retries or pass a plugin with `setup(registry)` and `middleware`. `onAdapterStart` and `onAdapterFinish` observe scheduled units, including cache hits.
+- Await `context.trackInputs(paths)` before reading dynamic files. Pass `{ late: true }` for dependencies discovered after reading, so later builds can fingerprint them safely. Set `prepare: true` on registrations that need to discover dependencies before cache lookup. Declare a cache on each step to cache build phases independently.
+- Detailed reports and adapter finish hooks expose cache miss diagnostics. Use `cache.fingerprint(context, components)` to contribute a custom fingerprint component. Set `cache.shared: true` for portable tasks with identical output layouts. A `CacheBackend` with `get` and `put` can persist entries remotely. Restored outputs are verified before publication. The default discovery and diagnostics index lives next to the cache in `.build-matrix-cache-state`.
+- Use `consumes: ["upstream-task-id"]` to depend on an earlier stage's artifacts and `artifacts.get(id)` to read them. Selecting a consumer also selects its prerequisite invocations. Variant tasks consume the matching variant or a global producer. Global tasks can consume all variants. The downstream cache fingerprints the consumed artifacts.
+- Use `artifacts.register(artifact)` to record direct outputs, `artifacts.reserve(path)` before directly writing an exclusive output, and `artifacts.validate(artifact)` to verify a file. Use `artifacts.stage(artifact)` to write to a temporary location. The executor validates all staged artifacts before installing them and rolls back if installation fails. `artifacts.transform` and `artifacts.validate` execution options can process fresh outputs. For staged outputs, the hooks also receive the temporary source path.
+- Set `manifestPath` and `artifacts.cleanup: ['dist']` to remove obsolete outputs from a previous successful manifest after a successful unfiltered run. Cleanup is restricted to the configured directories. A directory artifact represents ownership of its contents.
 
 ## Troubleshooting
 

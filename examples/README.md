@@ -82,3 +82,28 @@ node dist/cli/bin.js examples/08-vite-environments/build-matrix.json --json --de
 ```
 
 A single Vite task builds `client` and then `ssr`. It verifies and reports `dist/client/index.html` and `dist/server/render.js` with their environment names. Both paths are relative to the example directory. [Build Matrix config](./08-vite-environments/build-matrix.json) · [Vite config](./08-vite-environments/vite.config.ts)
+
+## 09 Release index from upstream artifacts
+
+```sh
+node examples/09-artifact-pipeline/run.ts
+```
+
+The script selects only the global `release-index` task. Its `consumes` declaration automatically selects `release-notes` for both locales. The index reads the published artifact paths via `artifacts.get()` and writes them to `dist/release.json`. Both adapters write to temporary paths via `artifacts.stage()` and publish their files on success. Find the task results and output paths in `reports/release.json` inside the example directory. [Script](./09-artifact-pipeline/run.ts)
+
+## 10 Incremental watch for independent targets
+
+```sh
+node dist/cli/bin.js examples/10-incremental-watch/build-matrix.json --watch-incremental --watch-strategy native --json --detailed --manifest reports/latest.json
+```
+
+After the initial run, edit `src/web.txt` in the example directory. The watcher discovers the file from `cache.inputs`, rebuilds `dist/web.txt`, and marks `worker` as `skipped` with `skipReason: "unchanged"`. Editing the shared `src/header.txt` rebuilds both targets. Inspect `watch.changes` and the task statuses in `reports/latest.json`. Press Ctrl+C to stop. [Configuration](./10-incremental-watch/build-matrix.json)
+
+## 11 Multiple Vite apps in one repository
+
+```sh
+node dist/cli/bin.js examples/11-vite-monorepo/build-matrix.json --max-concurrency 2 --json --detailed
+node dist/cli/bin.js examples/11-vite-monorepo/build-matrix.json --variant admin
+```
+
+The first command builds `apps/storefront` and `apps/admin` in parallel. Templated `root` and `outDir` options give each app its own `dist/<app>/index.html` in the example directory. With `artifacts: "files"`, the detailed report includes each file's size and SHA-256 digest. The second command builds only `admin`. [Configuration](./11-vite-monorepo/build-matrix.json)

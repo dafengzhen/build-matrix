@@ -1,4 +1,5 @@
 import type { JsonObject } from '@dafengzhen/build-matrix';
+import type { Plugin } from 'vite';
 import type { TestContext } from 'vitest';
 
 import { createPlan } from '@dafengzhen/build-matrix';
@@ -141,6 +142,66 @@ it('invalidates the process cache when Vite configuration imports or env files c
   expect(await readFile(join(cwd, 'dist', 'index.html'), 'utf8')).toContain('second');
   await writeFile(join(cwd, '.env.production.local'), 'VITE_VALUE=updated');
   expect((await run()).status).toBe('success');
+});
+
+it('tracks environment plugin inputs and releases cached builders on registry disposal', async (t) => {
+  const cwd = await workspace(t);
+  const input = join(cwd, 'extra.txt');
+  await writeFile(join(cwd, 'index.html'), '<p>page</p>');
+  await writeFile(input, 'first');
+  let builders = 0;
+  let disposed = 0;
+  const registry = createDefaultRegistry(
+    {},
+    {
+      vite: {
+        beforeConfig(config, context) {
+          builders++;
+          context.onDispose(() => {
+            disposed++;
+          });
+          config.configFile = false;
+        },
+        cacheKey: 'environment-plugin-v1',
+        configureEnvironment(config, { environment }) {
+          if (environment === 'client') {
+            return { ...config, build: { ...config.build, minify: false } };
+          }
+        },
+        environmentPlugins: {
+          client: {
+            buildStart() {
+              this.addWatchFile(input);
+            },
+            async generateBundle() {
+              this.emitFile({
+                fileName: 'extra-data.txt',
+                source: await readFile(input, 'utf8'),
+                type: 'asset',
+              });
+            },
+            name: 'dynamic-input',
+          } satisfies Plugin,
+        },
+      },
+    },
+  );
+  t.onTestFinished(() => registry.dispose());
+  const configured = plan({ builder: 'reuse', execution: 'in-process' }, true);
+  const run = async () =>
+    (await executePlan(configured, { cwd, registry, signal: t.signal })).stages[0].tasks[0];
+  const first = await run();
+  assert.strictEqual(first.status, 'success', JSON.stringify(first));
+  expect((await run()).status).toBe('success');
+  expect((await run()).status).toBe('cached');
+  await writeFile(input, 'changed');
+  const changed = await run();
+  expect(changed.status).toBe('success');
+  expect(changed.cacheMiss).toContain(`discovered:${input}`);
+  expect(await readFile(join(cwd, 'dist', 'extra-data.txt'), 'utf8')).toBe('changed');
+  expect(builders).toBe(1);
+  await registry.dispose();
+  expect(disposed).toBe(1);
 });
 
 it('watches configuration imports and reuses an in-process Builder across source changes', async (t) => {

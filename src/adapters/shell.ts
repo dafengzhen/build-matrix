@@ -1,4 +1,4 @@
-import type { Adapter } from '../executor/types.js';
+import type { Adapter, TaskContext } from '../executor/types.js';
 
 import { asArray, asNonemptyString, asRecord, checkKeys, invalid } from '../core/validation.js';
 import { runProcess } from './process.js';
@@ -8,7 +8,7 @@ export type ShellOptions = {
   readonly command: string;
 };
 
-export function createShellAdapter(): Adapter<ShellOptions> {
+export function createShellAdapter() {
   return {
     async run(context, input) {
       const options = asRecord(input, 'shell options');
@@ -26,7 +26,7 @@ export function createShellAdapter(): Adapter<ShellOptions> {
       await runProcess(context, command, args);
       return {};
     },
-  };
+  } satisfies Adapter<ShellOptions, TaskContext>;
 }
 
 export default createShellAdapter();
