@@ -1,6 +1,6 @@
 {
   "name": "@dafengzhen/build-matrix",
-  "version": "0.1.5",
+  "version": "0.1.6",
   "description": "Run configurable build matrices and staged pipelines with task adapters, local caching, and file watching.",
   "keywords": [
     "build-matrix",
