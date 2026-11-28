@@ -1,6 +1,6 @@
 # Build Matrix examples
 
-[简体中文](./README.zh.md) · [Project README](../README.md) · [Reference](../docs/reference.md)
+[简体中文](./README.zh.md) · [Project README](../README.md)
 
 Run the commands from the repository root with Node.js 26 or later. CLI tasks use the configuration directory as their working directory.
 
@@ -41,7 +41,7 @@ Run the first command twice to see a cache hit. In watch mode, edit `examples/03
 node examples/04-programmatic/run.ts
 ```
 
-The script registers an adapter that returns variant metadata and prints it from an `onTaskFinish` hook. [Script](./04-programmatic/run.ts) · [API reference](../docs/reference.md#javascript-and-typescript-api)
+The script registers an adapter that returns variant metadata and prints it from an `onTaskFinish` hook. [Script](./04-programmatic/run.ts) · [API reference](../README.md#javascript-and-typescript-api)
 
 ## 05 Vite build modes
 

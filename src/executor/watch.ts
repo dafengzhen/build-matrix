@@ -1,9 +1,8 @@
 import { basename, dirname, relative, resolve, sep } from 'node:path';
 
 import type { Plan } from '../core/types.js';
-import type { ExecuteOptions } from './execute.js';
+import type { ExecuteOptions, PlanState } from './execute.js';
 import type { RunResult, WatchAdapter, WatchContext } from './types.js';
-import type { UnitState } from './unit.js';
 
 import { nativeWatchAdapter, pollingWatchAdapter } from '../adapters/watch.js';
 import { asArray, asPath, invalid } from '../core/validation.js';
@@ -62,7 +61,7 @@ export async function watchPlan(plan: Plan, options: WatchOptions): Promise<void
     cwd,
     registry,
   };
-  const state = new Map<string, UnitState>();
+  const state: PlanState = new Map();
   let number = 0;
   const adapter =
     options.watchAdapter ??
@@ -98,7 +97,17 @@ export async function watchPlan(plan: Plan, options: WatchOptions): Promise<void
       pollIntervalMs: options.pollIntervalMs,
       run: run.request,
       signal,
-      trackedPaths: () => [...new Set([...state.values()].flatMap(({ inputs }) => inputs))],
+      trackedPaths() {
+        const paths = new Set<string>();
+        for (const units of state.values()) {
+          for (const { inputs } of units.values()) {
+            for (const path of inputs) {
+              paths.add(path);
+            }
+          }
+        }
+        return [...paths];
+      },
     });
   } finally {
     await run.drain();

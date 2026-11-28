@@ -35,9 +35,9 @@ interface StagedArtifact {
 }
 
 export class ArtifactClaims {
-  readonly #claims = new Map<string, Set<string>>();
+  readonly #claims = new Map<TaskContext, Set<string>>();
 
-  claim(owner: string, paths: readonly string[]): void {
+  claim(owner: TaskContext, paths: readonly string[]): void {
     if (paths.length === 0) {
       return;
     }
@@ -46,17 +46,16 @@ export class ArtifactClaims {
       if (previousOwner === owner) {
         continue;
       }
-      for (const [index, path] of canonical.entries()) {
-        const conflict = [...claims].find((claimed) => pathsOverlap(path, claimed));
-        if (conflict !== undefined) {
-          throw Object.assign(
-            new Error(
-              `Output "${paths[index]}" of ${owner} overlaps "${conflict}" of ${previousOwner}`,
-            ),
-            {
-              code: 'ARTIFACT_CONFLICT',
-            },
-          );
+      for (const conflict of claims) {
+        for (const [index, path] of canonical.entries()) {
+          if (pathsOverlap(path, conflict)) {
+            throw Object.assign(
+              new Error(
+                `Output "${paths[index]}" of ${artifactOwner(owner)} overlaps "${conflict}" of ${artifactOwner(previousOwner)}`,
+              ),
+              { code: 'ARTIFACT_CONFLICT' },
+            );
+          }
         }
       }
     }
@@ -337,6 +336,10 @@ export async function validateArtifact(
     }
   }
   return { ...artifact, kind };
+}
+
+function artifactOwner({ stageId, taskId, variant }: TaskContext): string {
+  return `task "${stageId}/${taskId}"${variant === undefined ? '' : ` (${variant.id})`}`;
 }
 
 function isManifest(value: unknown): value is { stages: { tasks: TaskResult[] }[] } {

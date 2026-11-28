@@ -1,6 +1,6 @@
 # Build Matrix 使用示例
 
-[English](./README.md) · [项目说明](../README.zh.md) · [配置与 API 参考](../docs/reference.zh.md)
+[English](./README.md) · [项目说明](../README.zh.md)
 
 请使用 Node.js 26 或更高版本，并在仓库根目录运行下列命令。CLI 任务以配置文件所在目录为工作目录。
 
@@ -41,7 +41,7 @@ node dist/cli/bin.js examples/03-cache-watch/build-matrix.json --watch src --wat
 node examples/04-programmatic/run.ts
 ```
 
-脚本注册了一个返回变体元数据的适配器，并用 `onTaskFinish` 钩子打印这些数据。[脚本](./04-programmatic/run.ts) · [API 参考](../docs/reference.zh.md#javascript-和-typescript-api)
+脚本注册了一个返回变体元数据的适配器，并用 `onTaskFinish` 钩子打印这些数据。[脚本](./04-programmatic/run.ts) · [API 参考](../README.zh.md#javascript-和-typescript-api)
 
 ## 05 Vite 构建模式
 

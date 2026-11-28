@@ -32,13 +32,12 @@ export function createPlan(input: unknown): Plan {
       ? undefined
       : asResourceLimits(pipeline.resourceLimits, 'pipeline.resourceLimits');
   const stageIds = new Set<string>();
-  const taskIds = new Set<string>();
+  const taskStages = new Map<string, string>();
   const stages = asArray(pipeline.stages, 'pipeline.stages').map((value, index): PlannedStage => {
-    const upstream = new Set(taskIds);
     const path = `pipeline.stages[${index}]`;
     const stage = asRecord(value, path);
     checkKeys(stage, path, ['id', 'tasks', 'failurePolicy']);
-    const id = uniqueId(stage.id, `${path}.id`, stageIds);
+    const stageId = uniqueId(stage.id, `${path}.id`, stageIds);
     const failurePolicy = stage.failurePolicy === undefined ? 'fail-fast' : stage.failurePolicy;
     if (
       failurePolicy !== 'fail-fast' &&
@@ -60,7 +59,11 @@ export function createPlan(input: unknown): Plan {
         'environment',
         'resourceGroup',
       ]);
-      const id = uniqueId(task.id, `${taskPath}.id`, taskIds);
+      const id = asNonemptyString(task.id, `${taskPath}.id`);
+      if (taskStages.has(id)) {
+        invalid(`${taskPath}.id`, `duplicate ID "${id}"`);
+      }
+      taskStages.set(id, stageId);
       const adapter = asNonemptyString(task.adapter, `${taskPath}.adapter`);
       const scope = task.scope === undefined ? 'variant' : task.scope;
       if (scope !== 'variant' && scope !== 'global') {
@@ -88,7 +91,8 @@ export function createPlan(input: unknown): Plan {
                 asArray(task.consumes, `${taskPath}.consumes`).map((value, index) => {
                   const field = `${taskPath}.consumes[${index}]`;
                   const dependency = asNonemptyString(value, field);
-                  if (!upstream.has(dependency)) {
+                  const producerStage = taskStages.get(dependency);
+                  if (producerStage === undefined || producerStage === stageId) {
                     invalid(field, `expected a task ID from an earlier stage, got "${dependency}"`);
                   }
                   return dependency;
@@ -113,7 +117,7 @@ export function createPlan(input: unknown): Plan {
         ...(resourceGroup === undefined ? {} : { resourceGroup }),
       });
     });
-    return Object.freeze({ failurePolicy, id, tasks: Object.freeze(tasks) });
+    return Object.freeze({ failurePolicy, id: stageId, tasks: Object.freeze(tasks) });
   });
   return Object.freeze({
     stages: Object.freeze(stages),

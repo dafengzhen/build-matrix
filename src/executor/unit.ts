@@ -80,6 +80,8 @@ interface Unit {
   readonly taskData: Map<unknown, unknown>;
 }
 
+export const rootUnitKey = '[]';
+
 export function affected(state: undefined | UnitState, changed: readonly string[]): boolean {
   return (
     state?.output === undefined ||
@@ -93,7 +95,7 @@ export async function runUnit(unit: Unit, service: UnitServices): Promise<UnitRe
   const { context: base, options } = unit;
   const { cwd, signal, stageId, taskId, variant } = base;
   const { lifecycle, registry, state, visited } = service;
-  const key = unitKey(base, path);
+  const key = JSON.stringify(path);
   visited.add(key);
   const previous = state.get(key);
   const declared = (unit.cache?.inputs ?? []).map((path) => resolve(cwd, path));
@@ -405,13 +407,6 @@ export async function runUnit(unit: Unit, service: UnitServices): Promise<UnitRe
   return outcome!;
 }
 
-export function unitKey(
-  context: Pick<TaskContext, 'taskId' | 'variant'>,
-  path: readonly string[] = [],
-): string {
-  return JSON.stringify([context.taskId, context.variant?.id, ...path]);
-}
-
 function listInputs(paths: Iterable<string>, declared: readonly string[]) {
   const boundaries = declared.map(physicalPath);
   const unique = new Map<string, string>();
@@ -501,7 +496,7 @@ async function runSteps(
   for (const step of ordered) {
     const { context } = parent;
     const path = [...parent.path, step.id];
-    const key = unitKey(context, path);
+    const key = JSON.stringify(path);
     const previous = service.state.get(key);
     const dependencies = new Map(parent.dependencies);
     let dependencyChanged = false;
@@ -522,13 +517,14 @@ async function runSteps(
       adapterId === undefined
         ? step.options
         : service.registry.mergeTaskOptions(adapterId, step.options);
+    const environment = step.environment ?? parent.environment;
     const signature = JSON.stringify([
       adapterId,
       options,
       step.cache,
       step.inputs,
       step.dependsOn,
-      step.environment,
+      environment,
     ]);
     try {
       if (
@@ -538,6 +534,9 @@ async function runSteps(
         previous.signature === signature &&
         !affected(previous, service.changed)
       ) {
+        service.reserve(
+          (previous.output.outputs ?? []).map(({ path }) => resolve(context.cwd, path)),
+        );
         for (const existing of service.state.keys()) {
           if (existing === key || existing.startsWith(key.slice(0, -1) + ',')) {
             service.visited.add(existing);
@@ -553,7 +552,7 @@ async function runSteps(
             cache,
             context: { ...context, cacheOutputs: cache?.outputs },
             dependencies,
-            environment: step.environment ?? parent.environment,
+            environment,
             inputs: step.inputs,
             options,
             path,

@@ -398,6 +398,34 @@ it('watch publishes a cancelled active run before returning', { timeout: 5000 },
   ]);
 });
 
+it('watches the creation and deletion of an empty directory', async (t) => {
+  const cwd = await workspace(t);
+  const controller = new AbortController();
+  const reports: RunResult[] = [];
+  await watchPlan(plan([{ id: 'build', tasks: [task('work')] }]), {
+    cwd,
+    debounceMs: 20,
+    async onRun(result) {
+      reports.push(result);
+      if (reports.length === 1) {
+        await mkdir(join(cwd, 'empty'));
+      } else if (reports.length === 2) {
+        await rm(join(cwd, 'empty'), { recursive: true });
+      } else {
+        controller.abort();
+      }
+    },
+    paths: ['.'],
+    pollIntervalMs: 10,
+    registry: registryFor(async () => ({})),
+    signal: AbortSignal.any([controller.signal, t.signal]),
+  });
+  expect(reports.slice(1).map(({ watch }) => watch?.changes)).toEqual([
+    [{ kind: 'added', path: 'empty' }],
+    [{ kind: 'deleted', path: 'empty' }],
+  ]);
+});
+
 it('delegates run triggers to the watch adapter and reports each completed run', async (t) => {
   const cwd = await workspace(t);
   const signal = new AbortController().signal;

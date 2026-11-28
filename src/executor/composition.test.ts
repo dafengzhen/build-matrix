@@ -236,6 +236,53 @@ it('rebuilds affected steps and downstream tasks when overlapping watch requests
   expect(reports[1].watch?.changedPaths).toEqual(['b.txt']);
 });
 
+it('includes only matching producer variants for variant consumers and all variants for global consumers', async (t) => {
+  const cwd = await workspace(t);
+  const registry = new AdapterRegistry().register('custom', {
+    factory: () => ({
+      run({ artifacts, taskId, variant }) {
+        if (taskId === 'bundle') {
+          return { outputs: [{ path: `${variant?.id}.txt` }] };
+        }
+        if (taskId === 'verify') {
+          return { metadata: { inputs: artifacts.get('bundle').map(({ path }) => path) } };
+        }
+        return {};
+      },
+    }),
+  });
+  const configured = createPlan({
+    matrix: { dimensions: { mode: ['one', 'two'] }, idTemplate: '{mode}' },
+    pipeline: {
+      stages: [
+        { id: 'build', tasks: [{ adapter: 'custom', id: 'bundle' }] },
+        { id: 'check', tasks: [{ adapter: 'custom', consumes: ['bundle'], id: 'verify' }] },
+        {
+          id: 'report',
+          tasks: [{ adapter: 'custom', consumes: ['verify'], id: 'summary', scope: 'global' }],
+        },
+      ],
+    },
+  });
+  const run = (taskId: string) =>
+    executePlan(configured, {
+      cwd,
+      filter: { taskIds: [taskId], variantIds: ['two'] },
+      registry,
+    });
+  const variant = await run('verify');
+  expect(variant.status).toBe('success');
+  expect(variant.stages[0].tasks.map(({ status }) => status)).toEqual(['skipped', 'success']);
+  expect(variant.stages[1].tasks[1].metadata?.inputs).toEqual(['two.txt']);
+  const global = await run('summary');
+  expect(global.status).toBe('success');
+  expect(global.counts.success).toBe(5);
+  expect(global.stages[1].tasks.map(({ metadata }) => metadata?.inputs)).toEqual([
+    ['one.txt'],
+    ['two.txt'],
+  ]);
+});
+
 it('rolls back staged outputs on validation failure and cleans obsolete owned files on success', async (t) => {
   const cwd = await workspace(t);
   const registry = new AdapterRegistry().register('emit', {
@@ -349,4 +396,109 @@ it('detects output conflicts before direct writes and continues independent stag
   );
   expect(report.stages[1].tasks[0].error?.code).toBe('ARTIFACT_DEPENDENCY_UNAVAILABLE');
   expect(report.stages[1].tasks[1].status).toBe('success');
+});
+
+it('reserves an unchanged task output before a dirty task starts', async (t) => {
+  const cwd = await workspace(t);
+  const reports: RunResult[] = [];
+  let target = 'separate.txt';
+  const registry = new AdapterRegistry().register('emit', {
+    factory: () => ({
+      async run({ artifacts, taskId, trackInputs }) {
+        await trackInputs([`${taskId}.input`]);
+        const path = taskId === 'dirty' ? target : 'shared.txt';
+        await artifacts.reserve(path);
+        await writeFile(join(cwd, path), taskId);
+        return { outputs: [{ path }] };
+      },
+    }),
+  });
+  await watchPlan(
+    plan([
+      { adapter: 'emit', id: 'dirty' },
+      { adapter: 'emit', id: 'unchanged' },
+    ]),
+    {
+      cwd,
+      incremental: true,
+      onRun(result) {
+        reports.push(result);
+      },
+      registry,
+      watchAdapter: {
+        async watch({ run }) {
+          await run([]);
+          target = 'shared.txt';
+          await run(['dirty.input']);
+        },
+      },
+    },
+  );
+  expect(reports[0].status).toBe('success');
+  expect(reports[1].stages[0].tasks[0].error?.code).toBe('ARTIFACT_CONFLICT');
+  expect(await readFile(join(cwd, 'shared.txt'), 'utf8')).toBe('unchanged');
+});
+
+it('distinguishes artifact owners even when stage and task IDs contain slashes', async (t) => {
+  const cwd = await workspace(t);
+  const registry = new AdapterRegistry().register('emit', {
+    factory: () => ({
+      async run({ artifacts }) {
+        await artifacts.reserve('shared.txt');
+        return { outputs: [{ path: 'shared.txt' }] };
+      },
+    }),
+  });
+  const configured = createPlan({
+    matrix: { dimensions: {} },
+    pipeline: {
+      stages: [
+        { id: 'build/nested', tasks: [{ adapter: 'emit', id: 'write' }] },
+        { id: 'build', tasks: [{ adapter: 'emit', id: 'nested/write' }] },
+      ],
+    },
+  });
+  const result = await executePlan(configured, { cwd, registry });
+  expect(result.stages[0].tasks[0].status).toBe('success');
+  expect(result.stages[1].tasks[0].error?.code).toBe('ARTIFACT_CONFLICT');
+});
+
+it('reruns a nested step when its inherited environment changes', async (t) => {
+  const cwd = await workspace(t);
+  const environments: (string | undefined)[] = [];
+  let environment = 'client';
+  const nested = composeAdapter([
+    {
+      id: 'leaf',
+      inputs: ['leaf.txt'],
+      run(context) {
+        environments.push(context.environment);
+        return {};
+      },
+    },
+  ]);
+  const registry = new AdapterRegistry().register('compose', {
+    factory: () => ({
+      prepare: () => ({
+        steps: [
+          { id: 'trigger', inputs: ['trigger.txt'], run: () => ({}) },
+          { adapter: nested, environment, id: 'nested' },
+        ],
+      }),
+    }),
+    prepare: true,
+  });
+  await watchPlan(plan([{ adapter: 'compose', id: 'build' }]), {
+    cwd,
+    incremental: true,
+    registry,
+    watchAdapter: {
+      async watch({ run }) {
+        await run([]);
+        environment = 'server';
+        await run(['trigger.txt']);
+      },
+    },
+  });
+  expect(environments).toEqual(['client', 'server']);
 });

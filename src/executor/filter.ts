@@ -18,9 +18,51 @@ export function selectInvocations(plan: Plan, filter?: RunFilter) {
     () => plan.stages.flatMap((stage) => stage.tasks.map((task) => task.id)),
     'filter.taskIds',
   );
-  return (taskId: string, variantId?: string) =>
+  const selected = (taskId: string, variantId?: string) =>
     (tasks === undefined || tasks.has(taskId)) &&
     (variants === undefined || variantId === undefined || variants.has(variantId));
+  if (tasks === undefined && variants === undefined) {
+    return selected;
+  }
+
+  const taskList = plan.stages.flatMap(({ tasks }) => tasks);
+  const scopes = new Map(taskList.map(({ id, scope }) => [id, scope]));
+  const globalVariants = [undefined];
+  const variantIds = plan.variants.map(({ id }) => id);
+  const required = new Map<string, Set<string | undefined>>();
+  function include(taskId: string, ids: readonly (string | undefined)[]) {
+    let set = required.get(taskId);
+    if (set === undefined) {
+      set = new Set();
+      required.set(taskId, set);
+    }
+    for (const id of ids) {
+      set.add(id);
+    }
+  }
+
+  // Every producer is in an earlier stage, so all requests reach it before its turn.
+  for (const task of taskList.reverse()) {
+    const { consumes } = task;
+    if (!consumes?.length) {
+      continue;
+    }
+    const needed = required.get(task.id);
+    const ids = task.scope === 'global' ? globalVariants : variantIds;
+    for (const id of ids) {
+      if (!selected(task.id, id) && !needed?.has(id)) {
+        continue;
+      }
+      for (const producer of consumes) {
+        include(
+          producer,
+          scopes.get(producer) === 'global' ? globalVariants : id === undefined ? variantIds : [id],
+        );
+      }
+    }
+  }
+  return (taskId: string, variantId?: string) =>
+    selected(taskId, variantId) || (required.get(taskId)?.has(variantId) ?? false);
 }
 
 function selectedIds(

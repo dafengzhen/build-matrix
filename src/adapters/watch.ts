@@ -265,8 +265,11 @@ async function nativeRoot(path: string, signal: AbortSignal): Promise<string> {
   }
 }
 
-function signature({ ctimeNs, dev, ino, mode, mtimeNs, size }: BigIntStats): string {
-  return `${dev}:${ino}:${mode}:${size}:${mtimeNs}:${ctimeNs}`;
+function signature(info: BigIntStats): string {
+  const { ctimeNs, dev, ino, mode, mtimeNs, size } = info;
+  const identity = `${dev}:${ino}:${mode}`;
+  // Directory timestamps also change when an ignored child is written.
+  return info.isDirectory() ? identity : `${identity}:${size}:${mtimeNs}:${ctimeNs}`;
 }
 
 async function snapshot(
@@ -275,7 +278,7 @@ async function snapshot(
   signal: AbortSignal,
   followRoots = false,
 ) {
-  const files = new Map<string, string>();
+  const entries = new Map<string, string>();
   const visited = new Set<string>();
   async function visit(path: string, follow = false): Promise<void> {
     signal.throwIfAborted();
@@ -287,12 +290,11 @@ async function snapshot(
       const info = follow
         ? await stat(path, { bigint: true })
         : await lstat(path, { bigint: true });
+      entries.set(path, signature(info));
       if (info.isDirectory()) {
         for (const name of await readdir(path)) {
           await visit(join(path, name));
         }
-      } else {
-        files.set(path, signature(info));
       }
     } catch (error) {
       const code = (error as NodeJS.ErrnoException).code;
@@ -304,5 +306,5 @@ async function snapshot(
   for (const path of paths) {
     await visit(path, followRoots);
   }
-  return files;
+  return entries;
 }

@@ -30,7 +30,7 @@ import { createDetailedReport, createManifest, writeManifest } from './manifest.
 import { createDefaultRegistry } from './registry.js';
 import { createTaskCounts, normalizeError } from './result.js';
 import { StageScheduler } from './scheduler.js';
-import { affected, runUnit, unitKey } from './unit.js';
+import { affected, rootUnitKey, runUnit } from './unit.js';
 
 export interface ExecuteOptions {
   readonly artifacts?: ArtifactOptions;
@@ -47,9 +47,12 @@ export interface ExecuteOptions {
   readonly signal?: AbortSignal;
 }
 
+export type PlanState = Map<string, Map<string, UnitState>>;
+
 interface Invocation {
   readonly cache?: PreparedCache;
   readonly context: TaskContext;
+  readonly key: string;
   readonly selected: boolean;
   readonly task: PlannedTask;
 }
@@ -74,7 +77,7 @@ export async function runPlan(
   options: ExecuteOptions,
   watch?: WatchRunInfo,
   trackInputs?: TaskContext['trackInputs'],
-  state = new Map<string, UnitState>(),
+  state: PlanState = new Map(),
   incremental = false,
 ): Promise<RunResult> {
   const registry = options.registry ?? createDefaultRegistry();
@@ -105,7 +108,7 @@ export async function runPlan(
     invalid('manifestVersion', 'expected 1 or 2');
   }
   const runId = randomUUID();
-  const selected = selectionWithDependencies(plan, options.filter);
+  const selected = selectInvocations(plan, options.filter);
   const planned = plan.stages.map((stage) => ({
     invocations: listInvocations(
       stage,
@@ -124,7 +127,7 @@ export async function runPlan(
   );
   for (const { cache, context } of active) {
     claims.claim(
-      owner(context),
+      context,
       (cache?.outputs ?? []).map((path) => resolve(cwd, path)),
     );
   }
@@ -132,24 +135,33 @@ export async function runPlan(
     incremental && watch !== undefined && watch.number > 1
       ? watch.changedPaths.map((path) => resolve(cwd, path))
       : undefined;
-  const dirty = new Set<string>();
-  const upstream = new Map<string, Invocation[]>();
+  const dirty = new Set<Invocation>();
+  const upstream = new Map<string, Map<string | undefined, Invocation>>();
   for (const invocation of active) {
-    const { context, task } = invocation;
-    const key = unitKey(context);
+    const { context, key, task } = invocation;
+    const previous = state.get(key)?.get(rootUnitKey);
     if (
       watchChanges === undefined ||
-      affected(state.get(key), watchChanges) ||
-      dependenciesOf(invocation, upstream).some((producer) => dirty.has(unitKey(producer.context)))
+      affected(previous, watchChanges) ||
+      dependenciesOf(invocation, upstream).some((producer) => dirty.has(producer))
     ) {
-      dirty.add(key);
+      dirty.add(invocation);
+    } else {
+      // An unchanged task still owns the outputs that downstream tasks will consume.
+      claims.claim(
+        context,
+        (previous?.output?.outputs ?? []).map(({ path }) => resolve(cwd, path)),
+      );
     }
-    const invocations = upstream.get(task.id) ?? [];
-    invocations.push(invocation);
-    upstream.set(task.id, invocations);
+    let invocations = upstream.get(task.id);
+    if (invocations === undefined) {
+      invocations = new Map();
+      upstream.set(task.id, invocations);
+    }
+    invocations.set(context.variant?.id, invocation);
   }
-  const completed = new Map<string, TaskResult>();
-  const services: Omit<UnitServices, 'reserve' | 'visited'> = {
+  const completed = new Map<Invocation, TaskResult>();
+  const services: Omit<UnitServices, 'reserve' | 'state' | 'visited'> = {
     artifacts: options.artifacts,
     cacheDirectory,
     cacheOptions: options.cache || undefined,
@@ -157,7 +169,6 @@ export async function runPlan(
     lifecycle,
     registry,
     runData: new Map(),
-    state,
   };
   const startedAt = new Date().toISOString();
   const started = performance.now();
@@ -192,12 +203,9 @@ export async function runPlan(
         signal,
         lifecycle,
         async (invocation) => {
-          if (!dirty.has(unitKey(invocation.context))) {
-            const outputs = state.get(unitKey(invocation.context))?.output?.outputs;
-            claims.claim(
-              owner(invocation.context),
-              (outputs ?? []).map(({ path }) => resolve(cwd, path)),
-            );
+          if (!dirty.has(invocation)) {
+            const { key } = invocation;
+            const outputs = state.get(key)?.get(rootUnitKey)?.output?.outputs;
             return {
               ...taskIdentity(invocation),
               ...(outputs === undefined ? {} : { outputs }),
@@ -206,13 +214,14 @@ export async function runPlan(
             };
           }
           const producers = dependenciesOf(invocation, upstream);
-          const force = producers.some((producer) => dirty.has(unitKey(producer.context)));
+          const force = producers.some((producer) => dirty.has(producer));
           return runTask(
             invocation,
             { ...services, ...(force ? { changed: undefined } : {}) },
             producers,
             completed,
             claims,
+            state,
           );
         },
       );
@@ -226,7 +235,7 @@ export async function runPlan(
     }
     for (const [index, task] of result.tasks.entries()) {
       counts[task.status]++;
-      completed.set(unitKey(invocations[index].context), task);
+      completed.set(invocations[index], task);
     }
     stopped ||= result.status === 'failed' && stage.failurePolicy !== 'continue-pipeline';
     stages.push(result);
@@ -274,15 +283,27 @@ export async function runPlan(
 
 function dependenciesOf(
   invocation: Invocation,
-  upstream: ReadonlyMap<string, readonly Invocation[]>,
+  upstream: ReadonlyMap<string, ReadonlyMap<string | undefined, Invocation>>,
 ): Invocation[] {
   const variant = invocation.context.variant?.id;
-  return (invocation.task.consumes ?? []).flatMap((id) =>
-    (upstream.get(id) ?? []).filter(
-      ({ context }) =>
-        variant === undefined || context.variant === undefined || context.variant.id === variant,
-    ),
-  );
+  const dependencies: Invocation[] = [];
+  for (const id of invocation.task.consumes ?? []) {
+    const producers = upstream.get(id);
+    if (producers === undefined) {
+      continue;
+    }
+    if (variant === undefined) {
+      for (const producer of producers.values()) {
+        dependencies.push(producer);
+      }
+    } else {
+      const producer = producers.get(variant) ?? producers.get(undefined);
+      if (producer !== undefined) {
+        dependencies.push(producer);
+      }
+    }
+  }
+  return dependencies;
 }
 
 function dependencyUnavailable(id: string) {
@@ -329,17 +350,19 @@ function listInvocations(
         cache === undefined
           ? context
           : { ...context, cacheOutputs: Object.freeze([...cache.outputs]) };
-      return { cache, context: Object.freeze(adapterContext), selected: active, task };
+      return {
+        cache,
+        context: Object.freeze(adapterContext),
+        key: JSON.stringify([task.id, context.variant?.id]),
+        selected: active,
+        task,
+      };
     });
   });
   if (cacheDirectory !== undefined) {
     validateStageCaches(invocations.flatMap(({ cache }) => (cache === undefined ? [] : [cache])));
   }
   return invocations;
-}
-
-function owner({ stageId, taskId, variant }: TaskContext): string {
-  return `task "${stageId}/${taskId}"${variant === undefined ? '' : ` (${variant.id})`}`;
 }
 
 async function runStage(
@@ -412,14 +435,17 @@ async function runStage(
 
 async function runTask(
   invocation: Invocation,
-  service: Omit<UnitServices, 'reserve' | 'visited'>,
+  service: Omit<UnitServices, 'reserve' | 'state' | 'visited'>,
   producers: readonly Invocation[],
-  completed: ReadonlyMap<string, TaskResult>,
+  completed: ReadonlyMap<Invocation, TaskResult>,
   claims: ArtifactClaims,
+  planState: PlanState,
 ): Promise<TaskResult> {
-  const { context, task } = invocation;
+  const { context, key, task } = invocation;
   const { signal, variant } = context;
-  const { lifecycle, registry, state } = service;
+  const { lifecycle, registry } = service;
+  const state = planState.get(key) ?? new Map<string, UnitState>();
+  planState.set(key, state);
   const identity = taskIdentity(invocation);
   const startedAt = new Date().toISOString();
   const started = performance.now();
@@ -429,14 +455,13 @@ async function runTask(
     finishedAt: new Date().toISOString(),
     startedAt,
   });
-  const key = unitKey(context);
   const visited = new Set<string>();
   await lifecycle.emit('onTaskStart', { ...identity, startedAt }, identity);
   try {
     signal.throwIfAborted();
     const dependencies = new Map<string, Artifact[]>();
     for (const producer of producers) {
-      const result = completed.get(unitKey(producer.context));
+      const result = completed.get(producer);
       if (
         result?.status !== 'success' &&
         result?.status !== 'cached' &&
@@ -471,11 +496,11 @@ async function runTask(
         path: [],
         taskData: new Map(),
       },
-      { ...service, reserve: (paths) => claims.claim(owner(context), paths), visited },
+      { ...service, reserve: (paths) => claims.claim(context, paths), state, visited },
     );
     signal.throwIfAborted();
     for (const step of state.keys()) {
-      if (step.startsWith(key.slice(0, -1) + ',') && !visited.has(step)) {
+      if (!visited.has(step)) {
         state.delete(step);
       }
     }
@@ -486,47 +511,11 @@ async function runTask(
       status: outcome.status === 'unchanged' ? 'skipped' : outcome.status,
     };
   } catch (error) {
-    state.set(key, { inputs: state.get(key)?.inputs ?? [] });
+    state.set(rootUnitKey, { inputs: state.get(rootUnitKey)?.inputs ?? [] });
     return signal.aborted
       ? { ...finish(), status: 'cancelled' }
       : { ...finish(), error: normalizeError(error), status: 'failed' };
   }
-}
-
-function selectionWithDependencies(plan: Plan, filter?: RunFilter) {
-  const selected = selectInvocations(plan, filter);
-  const required = new Set<string>();
-  const tasks = new Map(
-    plan.stages.flatMap(({ tasks }) => tasks.map((task) => [task.id, task] as const)),
-  );
-  const key = (id: string, variantId?: string) => JSON.stringify([id, variantId]);
-  function visit(task: PlannedTask, variantId?: string) {
-    const identity = key(task.id, variantId);
-    if (required.has(identity)) {
-      return;
-    }
-    required.add(identity);
-    for (const id of task.consumes ?? []) {
-      const producer = tasks.get(id)!;
-      if (producer.scope === 'global' || variantId !== undefined) {
-        visit(producer, producer.scope === 'global' ? undefined : variantId);
-      } else {
-        for (const variant of plan.variants) {
-          visit(producer, variant.id);
-        }
-      }
-    }
-  }
-  for (const task of tasks.values()) {
-    for (const variantId of task.scope === 'global'
-      ? [undefined]
-      : plan.variants.map(({ id }) => id)) {
-      if (selected(task.id, variantId)) {
-        visit(task, variantId);
-      }
-    }
-  }
-  return (taskId: string, variantId?: string) => required.has(key(taskId, variantId));
 }
 
 function taskIdentity({ context, task }: Invocation) {
